@@ -1,0 +1,170 @@
+[
+  {
+    "id": "TRG-001",
+    "category": "trigger",
+    "prompt": "帮我把这份扫描版PDF第2页的第三段文字删除掉",
+    "should_trigger": true,
+    "expected_mode": "remove",
+    "keywords": ["扫描版", "PDF", "删除"],
+    "note": "典型删除场景：扫描版PDF + 删除内容"
+  },
+  {
+    "id": "TRG-002",
+    "category": "trigger",
+    "prompt": "这段文字往上移一行，补到删除的位置",
+    "should_trigger": true,
+    "expected_mode": "move",
+    "keywords": ["移", "文字"],
+    "note": "移动场景：文字位置调整"
+  },
+  {
+    "id": "TRG-003",
+    "category": "trigger",
+    "prompt": "把这行的甲方换成乙方，要用同页其他地方的字体",
+    "should_trigger": true,
+    "expected_mode": "replace",
+    "keywords": ["替换", "换成", "字体"],
+    "note": "替换场景：原生供体替换"
+  },
+  {
+    "id": "TRG-004",
+    "category": "trigger",
+    "prompt": "在签名处加上（实习律师）三个字，要和周围的扫描件看起来一样",
+    "should_trigger": true,
+    "expected_mode": "add",
+    "keywords": ["加上", "扫描件"],
+    "note": "增加文字场景：scan_text_fusion"
+  },
+  {
+    "id": "TRG-005",
+    "category": "trigger",
+    "prompt": "把这块内容复制到上面，然后把原来位置和其他几行都清掉",
+    "should_trigger": true,
+    "expected_mode": "compound",
+    "keywords": ["复制", "清掉"],
+    "note": "复合操作场景：复制后清除"
+  },
+  {
+    "id": "TRG-006",
+    "category": "trigger",
+    "prompt": "扫描件里这几行字需要编辑修改一下",
+    "should_trigger": true,
+    "expected_mode": null,
+    "keywords": ["扫描件", "编辑", "修改"],
+    "note": "泛化触发：只说编辑修改，应触发但模式待定"
+  },
+  {
+    "id": "TRG-007",
+    "category": "trigger",
+    "prompt": "帮我写一个Python爬虫脚本",
+    "should_trigger": false,
+    "keywords": [],
+    "note": "负例：与扫描PDF编辑无关"
+  },
+  {
+    "id": "TRG-008",
+    "category": "trigger",
+    "prompt": "分析这份Excel数据表的销售趋势",
+    "should_trigger": false,
+    "keywords": [],
+    "note": "负例：Excel数据分析，非扫描PDF"
+  },
+  {
+    "id": "BEH-001",
+    "category": "behavior",
+    "mode": "remove",
+    "description": "删除区域后输出尺寸不变、框外无变化、框内墨迹被清除",
+    "validation": {
+      "check_size": true,
+      "check_outside_boxes": true,
+      "check_inside_dark_pixels": true,
+      "max_outside_changes": 500,
+      "max_inside_dark_threshold": 180
+    }
+  },
+  {
+    "id": "BEH-002",
+    "category": "behavior",
+    "mode": "remove",
+    "description": "full 蒙版模式下整矩形区域被清理（含背景）",
+    "cli_args": {"mask-mode": "full"},
+    "validation": {
+      "check_size": true,
+      "check_outside_boxes": true,
+      "max_outside_changes": 500
+    }
+  },
+  {
+    "id": "BEH-003",
+    "category": "behavior",
+    "mode": "move",
+    "description": "移动后输出尺寸不变，目标位置出现内容",
+    "validation": {
+      "check_size": true,
+      "check_target_has_content": true
+    }
+  },
+  {
+    "id": "BEH-004",
+    "category": "behavior",
+    "mode": "compound",
+    "description": "复合操作后源块被清除、目标位置出现源块内容",
+    "validation": {
+      "check_size": true,
+      "check_target_has_content": true,
+      "check_source_cleared": true
+    }
+  },
+  {
+    "id": "BEH-005",
+    "category": "behavior",
+    "mode": "replace",
+    "description": "替换后输出尺寸不变，目标区域有新内容",
+    "validation": {
+      "check_size": true,
+      "check_target_has_content": true
+    }
+  },
+  {
+    "id": "BEH-006",
+    "category": "behavior",
+    "mode": "replace",
+    "description": "offset 归一化模式与 contrast 模式产生不同输出",
+    "cli_args": {"normalize-mode": "offset"},
+    "validation": {
+      "check_size": true,
+      "check_differs_from_contrast": true
+    }
+  },
+  {
+    "id": "BASE-001",
+    "category": "baseline",
+    "description": "无 skill 基线：直接用 PIL 粘贴不做扫描融合",
+    "gaps": [
+      "不会做对比度/底色归一化，粘贴区域纸色与目标行不一致",
+      "不会做羽化，粘贴边缘有明显硬边",
+      "不会验证输出像素级一致性"
+    ]
+  },
+  {
+    "id": "BASE-002",
+    "category": "baseline",
+    "description": "无 skill 基线：删除文字只用 Telea 不做墨迹蒙版",
+    "gaps": [
+      "不做墨迹阈值化+膨胀，整矩形交给 Telea 效果差",
+      "不做框外裁回，修补可能越界",
+      "不会验证空白行深色像素残留"
+    ]
+  },
+  {
+    "id": "BASE-003",
+    "category": "baseline",
+    "description": "无 skill 基线：增加文字不识别字体字号直接渲染",
+    "gaps": [
+      "不识别字体（NCC 匹配），字体不对",
+      "不识别字号（多阈值共识），字号不对",
+      "不做扫描融合和蓝灰晕染，新文字看起来太干净",
+      "不取参考颜色，墨色与原文不一致"
+    ]
+  }
+]

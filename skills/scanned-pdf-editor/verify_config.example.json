@@ -1,0 +1,46 @@
+[
+  {
+    "name": "示例：删除一行并上移",
+    "source_pdf": "1-原始文件/源.pdf",
+    "final_pdf": "4-最终文件/修改版.pdf",
+    "expected_image": "3-处理过程/task001/最终.png",
+    "page_size": [595.2, 841.68],
+    "expected_sha256": null,
+    "allowed_boxes": [[330, 1470, 2250, 3062]],
+    "expected_changed_pixels": null,
+    "expected_changed_bbox": null,
+    "blank_box": [330, 1470, 2250, 1490],
+    "blank_dark_limit": 0,
+    "preserve_box": [0, 0, 330, 3062],
+    "dark_box": null,
+    "dark_threshold": 180,
+    "dark_limit": 0,
+    "render_backend": "pdfium",
+    "render_dpi": 300,
+    "reproduce_command": null,
+    "reproduce_image": null
+  },
+  {
+    "name": "示例：替换文字（原生供体）",
+    "source_pdf": "1-原始文件/源.pdf",
+    "final_pdf": "4-最终文件/替换版.pdf",
+    "expected_image": "3-处理过程/task002/最终.png",
+    "page_size": [595.2, 841.68],
+    "expected_sha256": null,
+    "allowed_boxes": [
+      [1197, 1665, 1288, 1718],
+      [1196, 2110, 1289, 2165],
+      [1197, 2559, 1290, 2613]
+    ],
+    "expected_changed_pixels": null,
+    "expected_changed_bbox": null,
+    "blank_box": null,
+    "blank_dark_limit": 0,
+    "preserve_box": [0, 0, 595, 1665],
+    "dark_box": null,
+    "dark_threshold": 180,
+    "dark_limit": 0,
+    "render_backend": "pdfium",
+    "render_dpi": 300
+  }
+]

@@ -1,0 +1,10 @@
+opencv-python>=4.8
+pypdfium2>=4.0
+PyMuPDF>=1.24
+Pillow>=10.0
+numpy>=1.24
+reportlab>=4.0
+# 测试依赖：README 的自测命令 cd scripts && python3 -m pytest test_skill.py 需要
+pytest>=7.0
+# 静态检查依赖：run_checks.sh 回归门禁用
+ruff>=0.6

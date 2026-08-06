@@ -179,3 +179,33 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Project-level local and temporary files
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+.Spotlight-V100/
+.Trashes/
+
+# Editor and IDE local state
+.idea/
+.vscode/
+.cursor/
+.zed/
+*.swp
+*.swo
+*~
+
+# Local Agent skill install directories (user/workspace discoverable paths)
+.agents/
+.claude/
+.zcode/
+
+# Local environment variants; keep the shareable template
+.env.*
+!.env.example
+
+# Python tooling metadata not covered by the standard template above
+pip-wheel-metadata/
