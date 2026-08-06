@@ -31,6 +31,22 @@
 | BUG-017 | 修复 | remove_regions_interpolate 页面边缘采样不足时仍可能读到空平滑窗口，NaN 转 uint8 后把删除区部分填成纯黑 | 2026-08-05 20:53 | 2026-08-06 00:46 | 已修复 | 上下邻域样本行数 ≠ target_h 时用 cv2.resize 线性插值到目标高度再平滑；CHK-012 复现 (0,0,40,80)/(0,5,40,95) 零值通道=0、无 empty-slice 警告；task007 仍 bit-exact；见 [[TST-011]] |
 | BUG-018 | 修复 | evals/evals.json 中多处中文引号未做 JSON 转义，文件无法解析，与 CHK-009”符合 schema”结论矛盾 | 2026-08-05 20:53 | 2026-08-05 20:55 | 已修复 | 中文文本内 ASCII 双引号替换为中文引号””；python3 -m json.tool 验证合法；新增 test_evals_json_is_valid 回归测试；见 [[TST-010]] [[CHK-011]] |
 | BUG-019 | 修复 | test_skill.py 中 3 个测试用相对路径调用 identify_size.py / verify_outputs.py，从父目录运行 pytest 时找不到脚本文件 | 2026-08-06 01:10 | 2026-08-06 01:10 | 已修复 | 改为 Path(__file__).parent / “脚本名” 绝对路径；58 passed 从任意 CWD 均通过；见 [[CHK-015]] |
+| BUG-020 | 修复 | move_block / move_and_clear：目标 y 越顶时，或负切片静默绕到页底（source_y=(100,130) shift_y=150 → 块落 250–279），或混合正负切片 ValueError 崩溃（如 shift_y=120/150 对更高块） | 2026-08-06 11:30 | 2026-08-06 12:23 | 已修复 | move_block/move_and_clear 越界校验：目标 y 越顶/越底时 ValueError 报错，不再负切片绕底；合法路径 bit-exact；见 [[TST-012]] |
+| BUG-021 | 修复 | normalize_donor_patch contrast 模式对全墨迹/纯色供体 donor_contrast=0 → ZeroDivisionError 裸崩，无引导 | 2026-08-06 11:30 | 2026-08-06 12:23 | 已修复 | normalize_donor_patch contrast 模式加 donor/target 对比度下限守卫（<1.0 报错并提示 offset）；见 [[TST-012]] |
+| BUG-022 | 修复 | remove_regions_interpolate：框超出图像边界或零高度（y1==y2）时 fill 与切片 shape 不一致 → broadcast ValueError；框未裁进图像 | 2026-08-06 11:30 | 2026-08-06 12:23 | 已修复 | remove_regions_interpolate 框裁剪到图像边界内，越界框只填可见部分、全外框跳过；合法路径 bit-exact；见 [[TST-012]] |
+| BUG-023 | 修复 | paste_donor_patch / replace_with_donor：destination 使贴入区超出右下时底图切片小于供体/羽化蒙版 → broadcast ValueError | 2026-08-06 11:30 | 2026-08-06 12:23 | 已修复 | paste_donor_patch 贴入前校验目标区域完整落在图内，越界报清晰错误；合法路径 bit-exact；见 [[TST-012]] |
+| BUG-024 | 修复 | cmd_package --page-size 只给 1 个值或非数字时裸 IndexError/ValueError，无清晰参数错误 | 2026-08-06 11:30 | 2026-08-06 12:23 | 已修复 | cmd_package --page-size 解析加 try/except，校验 len==2/有限/正数，非法退出码 2；见 [[TST-012]] |
+| BUG-025 | 修复 | scan_text_fusion：sample_ink_color 零面积/倒置参考框 → NaN→ValueError；save_with_crop 将含斜杠的 --output 当文件名时未建中间目录（scan_edit_ops 嵌套 --output 已有 mkdir） | 2026-08-06 11:30 | 2026-08-06 12:23 | 已修复 | sample_ink_color 空 ROI 守卫（报错提示坐标/尺寸）；save_with_crop 改 ensure_dir(full.parent) 建子目录；见 [[TST-012]] |
+| BUG-026 | 修复 | evals/run_evals.py check_differs_from_contrast：args_c.index("--normalize-mode") 在三元赋值中先求值，无该参数时 ValueError；同文件 F401/E702 | 2026-08-06 11:30 | 2026-08-06 12:23 | 已修复 | run_evals.py check_differs_from_contrast 加合约检查（无 normalize-mode 时返回明确失败原因）；移除 F401 import os；见 [[TST-012]] |
+| BUG-027 | 修复 | run_checks.sh ruff 门禁只查 scripts/，漏掉 evals/，导致 [[BUG-026]] 漏过“ruff 全清”结论 | 2026-08-06 11:30 | 2026-08-06 12:23 | 已修复 | run_checks.sh ruff check . -> .. 覆盖 evals/；见 [[TST-012]] [[OPS-004]] |
+| BUG-028 | 修复 | parse_box 不校验坐标顺序：倒置/空框（如 x2&lt;x1）静默接受，后续空切片导致删除等操作无效果 | 2026-08-06 11:46 | 2026-08-06 12:23 | 已修复 | parse_box 加坐标顺序校验：x1>=x2 或 y1>=y2 时 ArgumentTypeError 报错；合法框不受影响；见 [[TST-013]] |
+| BUG-029 | 修复 | feather_mask(edge=0) 除零：角点/边缘 distance=0 处 NaN、其余为 1；edge&lt;0 时 alpha 全 0（供体静默丢失）。--feather 0 非可靠硬边 | 2026-08-06 11:46 | 2026-08-06 12:23 | 已修复 | feather_mask edge<=0 时返回全 1 硬边蒙版，避免除零 NaN；合法 edge>0 路径 bit-exact；见 [[TST-013]] |
+| BUG-030 | 修复 | save_image_as_pdf 不校验 page_size：0/负数仍写出 PDF，无友好报错 | 2026-08-06 11:46 | 2026-08-06 12:23 | 已修复 | save_image_as_pdf 封装前校验 page_size 有限且为正数，0/负/NaN 报 ValueError；合法路径 bit-exact；见 [[TST-013]] |
+| BUG-031 | 修复 | smooth_noise 在 1×1（max==min）时归一化除零，产生 NaN 中间态后经 uint8 静默退化；极小 mask 理论可触发 | 2026-08-06 11:46 | 2026-08-06 12:23 | 已修复 | smooth_noise 退化形状（max==min）时返回零场，避免归一化除零 NaN；合法形状 bit-exact；见 [[TST-013]] |
+| BUG-032 | 修复 | _select_page_image_xref：全部内嵌图 rect 为空时 ratio 全 0，strict 仅在 best_ratio&gt;0.5 且头部接近时报错，故静默返回无效 xref | 2026-08-06 11:46 | 2026-08-06 12:23 | 已修复 | _select_page_image_xref 全空 rect（best_ratio=0）时 RuntimeError 报错，不再静默返回无效 xref；正常多图不受影响；见 [[TST-013]] |
+| BUG-033 | 修复 | move_block / move_and_clear：倒置或零高 source_y（y1≥y2）仍通过 BUG-020 越界守卫；空移动后自动 cleanup 仍静默改图（探针：source_y=(60,40)/(40,40) 改 522px） | 2026-08-06 12:35 | 2026-08-06 12:44 | 已修复 | 库函数校验 x1&lt;x2、y1&lt;y2；CLI 新增 parse_ordered_pair 用于 --content-x/--source-y；见 [[TST-014]] [[CHK-021]] |
+| BUG-034 | 修复 | run_evals check_differs_from_contrast：仅检查 `--normalize-mode` 键存在，主跑已是 contrast 时仍做 contrast↔contrast，失败文案误报「offset 与 contrast 输出相同」 | 2026-08-06 12:35 | 2026-08-06 12:44 | 已修复 | 校验取值 ≠ contrast，否则返回合约失败原因；见 [[TST-014]] |
+| BUG-035 | 修复 | cmd_package 无 --page-size 时用 `--dpi 0` 推算 page_size → ZeroDivisionError 裸崩（BUG-024/030 未覆盖 dpi 回退路径） | 2026-08-06 12:35 | 2026-08-06 12:44 | 已修复 | dpi≤0 时 stderr 清晰错误并 exit 2；见 [[TST-014]] |
 
 ## 调整事项
 
@@ -63,6 +79,11 @@
 | CHK-014 | 检查 | 收尾验证：ruff 全清 + 回归门禁 run_checks.sh + 确定性 eval + EVAL.md 真实模型评测脚手架 | 2026-08-06 00:59 | 2026-08-06 00:59 | 已完成 | ruff check . → All checks passed（18→0）；run_checks.sh 通过；确定性 eval 17/17；evals/EVAL.md 含 6 用例源/基准映射+with/without-skill 流程+评分记录模板；见 [[OPT-003]] [[TST-009]] |
 | CHK-015 | 检查 | 续接会话验证：从父目录运行 pytest 发现 3 个路径相关测试失败，修复后全量回归 | 2026-08-06 01:10 | 2026-08-06 01:10 | 已完成 | 发现 [[BUG-019]]（相对路径改绝对路径）；58 passed 从任意 CWD 通过；ruff All checks passed；BUG-017 复现 zero=0 无警告 |
 | CHK-016 | 检查 | 审查 .gitignore 是否齐全：对照仓库垃圾文件、git check-ignore 与 skill 运行产物风险 | 2026-08-06 11:04 | 2026-08-06 11:04 | 已完成 | 现有缓存/系统/IDE/环境规则已生效；缺口含 Agent 安装目录，见 [[OPS-003]]；tmp/tasks/二进制产物为可选预防项 |
+| CHK-017 | 检查 | 全项目 bug 复查：基线回归（58 单测 / eval 17/17 / ruff scripts 通过）+ 探针复现，登记 [[BUG-020]]～[[BUG-027]] | 2026-08-06 11:30 | 2026-08-06 11:46 | 已完成 | 最重 [[BUG-020]] 静默绕底；代码未修 |
+| CHK-018 | 检查 | 双清单交叉确认：首轮 probe + 二次审查（parse_box/feather/page_size0/smooth_noise/xref 等）逐项最小复现后入账 | 2026-08-06 11:45 | 2026-08-06 11:47 | 已完成 | 确认 [[BUG-020]]～[[BUG-032]]；BUG-029 收窄为部分 NaN；编号沿用首轮入账，二次项续 [[BUG-028]]+；[[OPS-004]] 与 [[BUG-027]] 同因 |
+| CHK-019 | 检查 | BUG-020..032 全量修复回归验证：95 单测 + ruff 全清 + run_checks.sh + evals 17/17 + 合法路径 bit-exact（旧版 vs 新版逐函数对比） | 2026-08-06 11:46 | 2026-08-06 12:23 | 已完成 | 95 passed（80 原+15 新 TestBugFix028_032）；ruff check . 全清；run_checks.sh ✅；evals 17/17；feather/smooth_noise/save_pdf/telea/interpolate/move/replace/fusion/halo 全 bit-exact；见 [[BUG-020]]..[[BUG-032]] [[TST-012]] [[TST-013]] |
+| CHK-020 | 检查 | 独立复核 BUG-020..032 修复充分性：复跑门禁 + 边界探针 + correctness/testing 审查 | 2026-08-06 12:31 | 2026-08-06 12:40 | 已完成 | 鲜证据：95 passed、run_checks ✅、evals 17/17；宣称失败模式大多已堵住；残留 [[BUG-033]](P1) [[BUG-034]](P2) [[BUG-035]](P2)；测试缺口见备注（BUG-027 仅字符串锁、BUG-028 assertRaises 过宽、下溢/target_contrast/CLI page-size≤0 等未锁） |
+| CHK-021 | 检查 | BUG-033..035 修复回归：106 单测 + ruff + run_checks + evals 17/17；顺带收紧 BUG-027/028 测试并文档化单图空 rect | 2026-08-06 12:41 | 2026-08-06 12:44 | 已完成 | 106 passed；见 [[BUG-033]]..[[BUG-035]] [[TST-014]] |
 
 ## 测试数据
 
@@ -79,6 +100,9 @@
 | TST-009 | 开发 | 按 skill-creator 规范建立真实模型 with-skill / without-skill 基线运行、断言评分与可审阅结果 | 2026-08-05 20:53 | 2026-08-06 00:59 | 已解决 | 已澄清 skill-creator 规范本身是交互式（逐 prompt 新会话跑+人工审阅，无 grading.json/benchmark 文件格式）。完成脚手架：run_evals.py docstring 诚实改为「确定性自检、不运行模型」；新增 evals/EVAL.md（6 用例源/基准映射、with/without-skill 运行流程、4 维评分表、记录模板）。真实模型逐条运行需人工在新会话执行，填 EVAL.md 记录表，非脚本可一键完成 |
 | TST-010 | 开发 | TestBugFix016_018 新增 6 项回归测试：插值全宽/左边缘/右边缘无黑块 + compound 全宽 + identify_size 浅墨迹接受 + evals.json JSON 合法性 | 2026-08-05 20:55 | 2026-08-05 20:55 | 已完成 | 修复 [[BUG-016]] [[BUG-017]] [[BUG-018]]；54 passed（48 原 + 6 新）；见 [[CHK-011]] |
 | TST-011 | 开发 | 增加全宽大面积删除框贴近顶部/底部、上下样本总行数小于目标高度的插值回归测试 | 2026-08-05 23:43 | 2026-08-06 00:46 | 已完成 | TestBugFix017LargeEdge 4 项：top-heavy / bottom-heavy / near-full-height / CHK-012 双复现框；断言无 empty-slice 警告、无 NaN、零值通道=0；全量 58 passed；关闭 [[BUG-017]] |
+| TST-012 | 开发 | TestBugFix020_027 新增 22 项回归测试：BUG-020 越界移动(3)+BUG-021 零对比度(5)+BUG-022 插值越界(3)+BUG-023 贴入越界(2)+BUG-024 page-size(3)+BUG-025 空ROI/子目录(2)+BUG-026 evals合约(2)+BUG-027 ruff范围(2) | 2026-08-06 11:30 | 2026-08-06 12:23 | 已完成 | 80 passed（含此前 58 原+22 新）；ruff 全清；evals 17/17；见 [[BUG-020]]..[[BUG-027]] |
+| TST-013 | 开发 | TestBugFix028_032 新增 15 项回归测试：BUG-028 倒置框(4)+BUG-029 feather除零(3)+BUG-030 page_size校验(4)+BUG-031 smooth_noise退化(2)+BUG-032 空rect(2) | 2026-08-06 11:46 | 2026-08-06 12:23 | 已完成 | 95 passed（80 原+15 新）；ruff 全清；run_checks.sh 通过；evals 17/17；见 [[BUG-028]]..[[BUG-032]] |
+| TST-014 | 开发 | TestBugFix033_035 + 测试收紧：倒置/零高 move(4)+parse_ordered_pair(2)+destination 点坐标(1)+evals contrast 合约(1)+dpi≤0(2)+单图空 rect 文档化(1)；BUG-027 非注释命令锁；BUG-028 ArgumentTypeError | 2026-08-06 12:41 | 2026-08-06 12:44 | 已完成 | 106 passed（95 原+约 11 新/收紧）；见 [[BUG-033]]..[[BUG-035]] [[CHK-021]] |
 
 ## 文档维护
 
@@ -92,6 +116,8 @@
 | DOC-006 | 文档 | SKILL.md 修正：封装示例补 scripts/ 前缀（L324 与 L310 不一致）；--reproduce 注释改为基准图/reproduce_command 语义；identify_size --font 三写法说明 | 2026-08-05 19:40 | 2026-08-05 19:51 | 已完成 | 对应 [[BUG-004]] [[BUG-006]] 的文档侧 |
 | DOC-007 | 文档 | 明确 scan_text_fusion.py --output 是 --output-dir 内的文件名（非完整路径）；SKILL.md 参数表补 --output-dir/--output 行 + 脚本 help 同步（复现对比 G5） | 2026-08-05 19:45 | 2026-08-05 19:51 | 已完成 | 第 5 步融合示例与工具参考表均已覆盖 |
 | DOC-008 | 文档 | SKILL.md font_registry 节补 macOS ~/Library/Fonts 目录说明 + 字体缺失安装指引 blockquote；identify_font.py docstring 同步置信度不足提示 | 2026-08-05 20:15 | 2026-08-05 20:25 | 已完成 | macOS 仿宋行改为"需自行安装（放入 ~/Library/Fonts）"；新增字体缺失提示说明 |
+| DOC-009 | 文档 | SKILL.md 参数表补全：remove 表加 --noise-sigma/--seed 行；move 表加 --cleanup-boxes 行并更新 --shift-y 描述 | 2026-08-06 11:30 | 2026-08-06 12:23 | 已完成 | 对应 [[BUG-020]]..[[BUG-027]] 修复涉及的参数文档化 |
+| DOC-010 | 文档 | 版本升至 V0.1.1：新增 VERSION/CHANGELOG；同步根 README、skill README、SKILL.md（坐标有序、page-size/dpi/feather、package 参数表）、evals/README；CLI help 对齐 | 2026-08-06 12:45 | 2026-08-06 12:48 | 已完成 | 全称 V0.1.1-Build0178-20260806；SKILL.md 468 行仍 &lt;500；106 passed / run_checks ✅ |
 
 ## 功能开发
 
@@ -111,6 +137,7 @@
 | OPS-001 | 运维 | 补充项目级 .gitignore，覆盖常规操作系统临时文件、IDE 本地状态、环境变量变体和 Python 打包临时元数据 | 2026-08-06 11:03 | 2026-08-06 11:03 | 已完成 | 保留 .env.example 与依赖锁文件；已执行 git check-ignore 代表性路径验证 |
 | OPS-002 | 运维 | 安装 CLAUDE.md 会话结束任务同步规则与 Stop hook，提醒后续 agent 自动维护 task-list | 2026-08-06 11:07 | 2026-08-06 11:07 | 已完成 | 中文规则写入 CLAUDE.md；hook 注册于 .claude/settings.json，脚本为 .claude/hooks/tasklist_sync_reminder.sh；已验证 JSON、可执行权限及单会话去重 |
 | OPS-003 | 运维 | .gitignore 增补 Agent 安装目录忽略：.agents/、.claude/、.zcode/ | 2026-08-06 11:09 | 2026-08-06 11:09 | 已完成 | 源码目录 skills/ 不受影响；git check-ignore 验证三条规则生效；见 [[CHK-016]] |
+| OPS-004 | 运维 | run_checks.sh ruff 漏查 evals/（与 [[BUG-027]] 同因） | 2026-08-06 11:45 | 2026-08-06 11:47 | 已关闭 | 并入 [[BUG-027]] 跟踪，避免重复；修复时改 run_checks.sh 即可 |
 
 ## 规划事项
 
@@ -138,14 +165,14 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 19 | 19 | 0 | 100% |
+| 代码 Bug | 35 | 35 | 0 | 100% |
 | 调整事项 | 6 | 6 | 0 | 100% |
-| 检查事项 | 16 | 16 | 0 | 100% |
-| 测试数据 | 11 | 11 | 0 | 100% |
-| 文档维护 | 8 | 8 | 0 | 100% |
+| 检查事项 | 21 | 21 | 0 | 100% |
+| 测试数据 | 14 | 14 | 0 | 100% |
+| 文档维护 | 10 | 10 | 0 | 100% |
 | 功能开发 | 6 | 6 | 0 | 100% |
-| 配置运维 | 3 | 3 | 0 | 100% |
+| 配置运维 | 4 | 4 | 0 | 100% |
 | 规划事项 | 2 | 2 | 0 | 100% |
 | 优化事项 | 3 | 3 | 0 | 100% |
 | 调研事项 | 2 | 2 | 0 | 100% |
-| **总计** | 76 | 76 | 0 | 100% |
+| **总计** | 103 | 103 | 0 | 100% |

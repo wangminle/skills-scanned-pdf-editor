@@ -21,7 +21,6 @@ with-skill / without-skill 评测见同目录 EVAL.md（交互式，逐 prompt �
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -280,18 +279,22 @@ def run_single_behavior(case, mode, cli_args, src_path, out_path, original_img):
                 return False, f"目标位置无内容: dark={dark}"
 
         if validation.get("check_differs_from_contrast"):
-            # 用 contrast 模式再跑一次，对比输出不同
-            out_contrast = out_path.parent / f"{out_path.stem}_contrast.png"
-            args_c = args[:]; args_c[args_c.index("--normalize-mode") + 1] = "contrast" \
-                if "--normalize-mode" in args_c else args_c + ["--normalize-mode", "contrast"]
-            # 确保有 contrast 对照
-            if "--normalize-mode" not in args_c:
-                args_c += ["--normalize-mode", "contrast"]
-                out_contrast_path = out_contrast
-                args_c[args_c.index("--output") + 1] = str(out_contrast_path)
-            else:
-                out_contrast_path = out_contrast
-                args_c[args_c.index("--output") + 1] = str(out_contrast_path)
+            # 用 contrast 模式再跑一次，对比输出不同。
+            # BUG-026：旧实现把 args_c.index("--normalize-mode") 写在赋值目标里，
+            # 先于条件表达式求值——case 未带该参数时必炸 ValueError；且 fallback
+            # 分支（给单元素赋一个 list）本身也是死代码。重写为显式分支，并在
+            # 主跑不是非 contrast 模式时给出明确失败原因（contrast vs contrast 无意义）。
+            if "--normalize-mode" not in args:
+                return False, ("check_differs_from_contrast 要求 cli_args 指定非 contrast 的"
+                               " normalize-mode（如 offset），否则对照无意义")
+            mode_idx = args.index("--normalize-mode") + 1
+            if mode_idx >= len(args) or args[mode_idx] == "contrast":
+                return False, ("check_differs_from_contrast 要求 cli_args 指定非 contrast 的"
+                               " normalize-mode（如 offset），否则对照无意义")
+            out_contrast_path = out_path.parent / f"{out_path.stem}_contrast.png"
+            args_c = args[:]
+            args_c[mode_idx] = "contrast"
+            args_c[args_c.index("--output") + 1] = str(out_contrast_path)
             run_cli(args_c, SCRIPTS_DIR)
             if out_contrast_path.exists():
                 out_c = np.asarray(Image.open(out_contrast_path))

@@ -104,9 +104,16 @@ def make_text_mask(size: tuple[int, int], font: ImageFont.FreeTypeFont,
 
 def smooth_noise(shape: tuple[int, int], rng: np.random.Generator,
                  blur: float, amp: float) -> np.ndarray:
-    """生成平滑的 [-amp/2, amp/2] 浮点噪声场，用于模拟墨色/alpha 的不均匀。"""
+    """生成平滑的 [-amp/2, amp/2] 浮点噪声场，用于模拟墨色/alpha 的不均匀。
+
+    1×1 等退化形状时 noise.max()==noise.min()，归一化除零产生 NaN（BUG-031）；
+    此时无噪声变异可言，返回零场。
+    """
     noise = rng.normal(0, 1, shape).astype(np.float32)
-    noise = (noise - noise.min()) / (noise.max() - noise.min())
+    span = float(noise.max() - noise.min())
+    if span == 0.0:
+        return np.zeros(shape, dtype=np.float32)
+    noise = (noise - noise.min()) / span
     img = Image.fromarray(np.uint8(noise * 255), "L").filter(ImageFilter.GaussianBlur(blur))
     return (np.asarray(img).astype(np.float32) / 255.0 - 0.5) * amp
 
@@ -252,6 +259,13 @@ def sample_ink_color(image: Image.Image, box: tuple[int, int, int, int],
     """
     x1, y1, x2, y2 = box
     arr = np.asarray(image.convert("RGB"))[y1:y2, x1:x2]
+    # BUG-025：框在图外/宽高为 0 时切片为空，后续 np.median 得 NaN 再转 int 崩溃。
+    # 空 ROI 直接报清晰错误，提示框与图像尺寸。
+    if arr.size == 0:
+        raise ValueError(
+            f"参考框 {box} 与图像没有交集（图像尺寸 {image.size}），无法取样墨色。"
+            "请检查坐标是否为像素坐标、是否写反或越界。"
+        )
     luma = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
     chosen = None
     if not quiet:
@@ -320,8 +334,10 @@ def labeled_compare(panels: list[tuple[str, Image.Image]], output_path: Path,
 def save_with_crop(image: Image.Image, output_dir: Path, filename: str,
                    crop_box: tuple[int, int, int, int] | None,
                    crop_filename: str | None = None) -> Path:
-    ensure_dir(output_dir)
     full = output_dir / filename
+    # BUG-025：--output 允许含子目录成分（如 sub/x.png），只建 output_dir 会
+    # FileNotFoundError；按完整目标路径建父目录。
+    ensure_dir(full.parent)
     image.save(full, quality=95)
     if crop_box and crop_filename:
         image.crop(crop_box).save(output_dir / crop_filename)

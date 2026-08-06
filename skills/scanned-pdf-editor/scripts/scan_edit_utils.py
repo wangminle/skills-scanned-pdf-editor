@@ -74,8 +74,14 @@ def save_image_as_pdf(
     subject: str,
 ) -> None:
     """按原页面点尺寸封装整页图，避免按 A4 常量误改非标准扫描页。"""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     width, height = page_size
+    # BUG-030：0/负数 page_size 仍能写出无效 PDF（0×0 页面），应在封装前拦截。
+    if not (np.isfinite(width) and np.isfinite(height)) or width <= 0 or height <= 0:
+        raise ValueError(
+            f"page_size 需为两个正数，收到: {page_size}。"
+            "请检查 --page-size 参数或 dpi 推算结果。"
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     pdf = canvas.Canvas(str(output_path), pagesize=page_size)
     pdf.setTitle(title)
     pdf.setSubject(subject)
@@ -137,7 +143,9 @@ def _select_page_image_xref(page, images: list, *, strict: bool = True) -> int:
     """从页面内嵌图列表中选出整页扫描图对应的 xref。
 
     评分 = 该图在页面上的 bbox 面积 / 页面面积。覆盖比例最大的视为整页扫描图。
-    单图直接返回；多图按覆盖比例选最大，``strict`` 下若头部并列会报错。
+    单图：直接返回唯一 xref（即使 get_image_rects 为空——此时无可选替代，
+    replace_image 仍可按 xref 替换）。多图：按覆盖比例选最大；全部 rect 为空
+    时报错；``strict`` 下若头部并列也会报错。
     """
     if len(images) == 1:
         return images[0][0]
@@ -160,6 +168,12 @@ def _select_page_image_xref(page, images: list, *, strict: bool = True) -> int:
     best_xref, best_ratio = scored[0]
     second_ratio = scored[1][1] if len(scored) > 1 else 0.0
 
+    # BUG-032：全部内嵌图 rect 为空时 best_ratio=0，旧代码静默返回无效 xref。
+    if best_ratio <= 0.0:
+        raise RuntimeError(
+            f"页面含 {len(images)} 张图，但所有图的渲染矩形均为空（ratio=0），"
+            "无法选出整页扫描图。请确认 PDF 页面结构是否正常。"
+        )
     if strict:
         # 头部两个候选覆盖比例都很高且接近时，无法可靠区分整页图与背景图，
         # 静默替换会冒替换错对象的风险——报错让调用方用新建 PDF 模式或人工处理。
@@ -181,7 +195,12 @@ def luma(rgb: np.ndarray) -> np.ndarray:
 
 
 def feather_mask(width: int, height: int, edge: int = 4) -> np.ndarray:
-    """生成边缘羽化的 alpha 蒙版，用于供体贴入时平滑过渡。"""
+    """生成边缘羽化的 alpha 蒙版，用于供体贴入时平滑过渡。
+
+    edge <= 0 时返回全 1 蒙版（硬边无羽化），避免除零产生 NaN（BUG-029）。
+    """
+    if edge <= 0:
+        return np.ones((height, width, 1), dtype=np.float32)
     yy, xx = np.mgrid[0:height, 0:width]
     distance = np.minimum.reduce((xx, width - 1 - xx, yy, height - 1 - yy)).astype(
         np.float32
@@ -190,10 +209,13 @@ def feather_mask(width: int, height: int, edge: int = 4) -> np.ndarray:
 
 
 def dark_median(rgb: np.ndarray, threshold: float = 180) -> np.ndarray:
-    """取暗色像素（亮度 < threshold）的 RGB 中位数，用于墨迹色采样。"""
+    """取暗色像素（亮度 < threshold）的 RGB 中位数，用于墨迹色采样。
+
+    供体/参考框都会走这里，文案不绑定具体调用场景（BUG-021）。
+    """
     values = rgb[luma(rgb) < threshold]
     if len(values) == 0:
-        raise ValueError("参考框中未找到暗色墨迹")
+        raise ValueError("区域中未找到暗色墨迹")
     return np.median(values, axis=0)
 
 
@@ -304,9 +326,16 @@ def remove_regions_interpolate(
     """
     result = image.copy()
     rng = np.random.default_rng(seed)
+    h, w = image.shape[:2]
 
     for left, top, right, bottom in boxes:
-        h, w = image.shape[:2]
+        # 框先裁剪到图像边界内（BUG-022）：越界框会让 target_h 大于实际切片高度，
+        # 最终赋值 broadcast 崩溃。裁剪后只填可见部分；完全在图外的框跳过。
+        # 界内框的裁剪结果与原值相同，不改变既有 bit-exact 行为。
+        left, right = max(0, left), min(w, right)
+        top, bottom = max(0, top), min(h, bottom)
+        if left >= right or top >= bottom:
+            continue
         target_h = bottom - top
         # 裁剪采样范围到图片边界内，防止越界产生空切片 -> NaN -> 黑块
         ls_left = max(left - sample_width, 0)
@@ -391,6 +420,25 @@ def move_block(
     """
     x1, x2 = content_x
     y1, y2 = source_y
+    # BUG-033：倒置/零高区间会空切片“移动”，随后自动 cleanup 仍静默改图。
+    if x1 >= x2:
+        raise ValueError(
+            f"content_x 需满足 x1<x2，收到: {content_x}。"
+            "请检查横向起止是否写反或输入了空区间。"
+        )
+    if y1 >= y2:
+        raise ValueError(
+            f"source_y 需满足 y1<y2，收到: {source_y}。"
+            "请检查纵向起止是否写反或输入了空区间。"
+        )
+    # BUG-020：shift_y 过大使目标 y 为负时，Python 负切片会把块静默写到页底，
+    # 产出看似正常的错误结果。越界直接报错，绝不静默绕行。
+    img_h = image.shape[0]
+    if y1 - shift_y < 0 or y2 - shift_y > img_h:
+        raise ValueError(
+            f"shift_y={shift_y} 使目标位置 y=[{y1 - shift_y}, {y2 - shift_y}) "
+            f"越出页面高度 {img_h}。请核对移动量与 --source-y 坐标。"
+        )
     result = image.copy()
     result[y1 - shift_y : y2 - shift_y, x1:x2] = image[y1:y2, x1:x2]
 
@@ -429,6 +477,24 @@ def move_and_clear(
     """
     x1, x2 = content_x
     y1, y2 = source_y
+    # BUG-033：与 move_block 相同，拒绝倒置/零高区间，避免空移动 + 清除路径静默改图。
+    if x1 >= x2:
+        raise ValueError(
+            f"content_x 需满足 x1<x2，收到: {content_x}。"
+            "请检查横向起止是否写反或输入了空区间。"
+        )
+    if y1 >= y2:
+        raise ValueError(
+            f"source_y 需满足 y1<y2，收到: {source_y}。"
+            "请检查纵向起止是否写反或输入了空区间。"
+        )
+    # BUG-020：与 move_block 相同，目标越界直接报错，避免负切片静默绕到页底。
+    img_h = image.shape[0]
+    if y1 - shift_y < 0 or y2 - shift_y > img_h:
+        raise ValueError(
+            f"shift_y={shift_y} 使目标位置 y=[{y1 - shift_y}, {y2 - shift_y}) "
+            f"越出页面高度 {img_h}。请核对移动量与 --source-y 坐标。"
+        )
     block = image[y1:y2, x1:x2].copy()
 
     # 先清除所有指定区域（含源区域本身），再粘贴保存的块到新位置。
@@ -484,6 +550,17 @@ def normalize_donor_patch(
 
     donor_contrast = float(luma(donor_bg) - luma(donor_ink))
     target_contrast = float(luma(target_bg) - luma(target_ink))
+    # BUG-021：全墨迹/纯色供体的 donor_contrast=0，直接相除会 ZeroDivisionError；
+    # 接近零的对比度也会把噪点放大成百倍，同样不可用。报错并给出替代路线。
+    if donor_contrast < 1.0:
+        raise ValueError(
+            "供体词块缺少纸白/墨迹对比度（全墨迹或纯色供体无法做对比度归一化）。"
+            "请改选含纸白背景的供体框，或用 --normalize-mode offset。"
+        )
+    if target_contrast < 1.0:
+        raise ValueError(
+            "参考框缺少墨迹对比度（可能框选在空白处），请重新选取 --reference-box。"
+        )
     contrast_scale = target_contrast / donor_contrast
 
     normalized = target_bg + (donor_patch.astype(np.float32) - donor_bg) * contrast_scale
@@ -504,11 +581,19 @@ def paste_donor_patch(
 
     返回 (贴入后的图像, 对比度倍率)。
     """
+    # BUG-023：destination 贴近右/下边缘导致供体放不下时，后续广播赋值会崩溃。
+    # 先校验目标区域完整落在图内，报错让调用方调整 --destination 或供体框。
+    dest_x, dest_y = destination
+    patch_height, patch_width = donor_patch.shape[:2]
+    img_h, img_w = image.shape[:2]
+    if dest_x < 0 or dest_y < 0 or dest_x + patch_width > img_w or dest_y + patch_height > img_h:
+        raise ValueError(
+            f"贴入位置 ({dest_x}, {dest_y}) + 供体尺寸 {patch_width}×{patch_height} "
+            f"越出图像 {img_w}×{img_h}。请调整 --destination 或缩小供体框。"
+        )
     normalized, scale = normalize_donor_patch(
         donor_patch, target_reference, target_background, mode=normalize_mode
     )
-    dest_x, dest_y = destination
-    patch_height, patch_width = donor_patch.shape[:2]
     alpha = feather_mask(patch_width, patch_height, edge=feather)
 
     result = image.astype(np.float32)

@@ -9,8 +9,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-echo "── ruff 静态检查 ──"
-ruff check .
+echo "── ruff 静态检查（scripts + evals，BUG-027：此前只查 scripts/ 漏掉 evals/）──"
+ruff check ..
 echo "ruff: 通过"
 
 echo

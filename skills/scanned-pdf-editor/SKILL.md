@@ -1,9 +1,12 @@
 ---
 name: scanned-pdf-editor
 description: 对用户有权编辑的扫描版 PDF 或扫描件图片做局部编辑（删除内容、移动位置、替换文字、补录新文字），使修改区域在字体、字号、墨色、纸纹、扫描噪点上与原扫描件像素级一致。仅用于授权且内容真实的场景，不用于伪造或篡改以误导第三方。
+version: V0.1.1
 ---
 
 # 扫描版 PDF 编辑修改（scanned-pdf-editor）
+
+> **版本**：V0.1.1（见仓库根目录 `VERSION` / `CHANGELOG.md`）
 
 对扫描版 PDF 或扫描件图片做局部编辑，使修改区域在字体、字号、墨色、纸纹、扫描噪点上
 与原扫描件保持一致。**仅用于用户有权编辑、且修改内容真实的场景**。
@@ -74,12 +77,14 @@ python3 scripts/scan_edit_ops.py remove \
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
-| `--boxes` | 删除区域列表，每个 `x1,y1,x2,y2` | 必填 |
+| `--boxes` | 删除区域列表，每个 `x1,y1,x2,y2`（须 `x1<x2` 且 `y1<y2`，倒置/空框会报错） | 必填 |
 | `--method` | `telea`（默认）或 `interpolate` | `telea` |
 | `--ink-threshold` | 墨迹亮度阈值（<此值为墨迹） | 180 |
 | `--dilation` | 膨胀核大小 | 5 |
 | `--inpaint-radius` | 修补半径 | 5 |
 | `--mask-mode` | `ink`=只清理墨迹（默认）；`full`=整矩形清理（连背景纸纹一并交给 Telea，适合有残影/污渍的区域） | `ink` |
+| `--noise-sigma` | interpolate 方法填底微噪点标准差 | 0.45 |
+| `--seed` | interpolate 方法随机种子 | 20260805 |
 
 ### 模式 B：移动位置
 
@@ -104,10 +109,11 @@ python3 scripts/scan_edit_ops.py move \
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
-| `--content-x` | 移动区域横向范围 `x1,x2` | 必填 |
-| `--source-y` | 移动区域纵向范围 `y1,y2` | 必填 |
-| `--shift-y` | 上移像素数（正值=上移） | 必填 |
+| `--content-x` | 移动区域横向范围 `x1,x2`（须 `x1<x2`） | 必填 |
+| `--source-y` | 移动区域纵向范围 `y1,y2`（须 `y1<y2`） | 必填 |
+| `--shift-y` | 上移像素数（正值=上移；目标位置越出页面会报错，不会静默绕行） | 必填 |
 | `--cleanup-ink-threshold` | 残留清理的墨迹阈值 | 246 |
+| `--cleanup-boxes` | 手动指定残留清理区域列表 `x1,y1,x2,y2`（可多个；每框须 `x1<x2` 且 `y1<y2`） | 自动取源区域尾部 |
 
 **注意**：移动框只包正文主栏，不得包含页框、页码、印章、批注。
 
@@ -130,10 +136,10 @@ python3 scripts/scan_edit_ops.py compound \
 | 参数 | 说明 | 默认 |
 |---|---|---|
 | `--source` | 输入图片路径 | 必填 |
-| `--content-x` | 内容横向范围 `x1,x2`（源块宽度） | 必填 |
-| `--source-y` | 源块纵向范围 `y1,y2` | 必填 |
-| `--shift-y` | 上移像素数（正值=上移） | 必填 |
-| `--clear-boxes` | 需清除的区域列表（`x1,y1,x2,y2`，可多个） | 必填 |
+| `--content-x` | 内容横向范围 `x1,x2`（源块宽度；须 `x1<x2`） | 必填 |
+| `--source-y` | 源块纵向范围 `y1,y2`（须 `y1<y2`） | 必填 |
+| `--shift-y` | 上移像素数（正值=上移；目标越出页面会报错） | 必填 |
+| `--clear-boxes` | 需清除的区域列表（`x1,y1,x2,y2`，可多个；每框须有序） | 必填 |
 | `--noise-sigma` | 插值填底的噪声 sigma | 0.45 |
 | `--seed` | 随机种子 | 20260805 |
 | `--output` | 输出路径 | 必填 |
@@ -172,9 +178,9 @@ python3 scripts/scan_edit_ops.py replace \
 | `--remove-boxes` | 目标清理框列表 | 必填 |
 | `--destination` | 供体贴入左上角 `x,y` | 必填 |
 | `--reference-box` | 目标行参考字框（用于暗度匹配） | 必填 |
-| `--feather` | 羽化宽度 | 4 |
+| `--feather` | 羽化宽度（`<=0` 视为硬边全覆盖，不产生 NaN） | 4 |
 | `--mask-mode` | 清理蒙版模式：`ink`=墨迹蒙版（默认）；`full`=整矩形蒙版 | `ink` |
-| `--normalize-mode` | 供体归一化：`contrast`=对比度缩放（默认）；`offset`=纯底色偏移（适合纸色色调一致但亮度有偏移） | `contrast` |
+| `--normalize-mode` | 供体归一化：`contrast`=对比度缩放（默认；供体/参考须有足够纸白-墨迹对比度，否则改用 `offset`）；`offset`=纯底色偏移 | `contrast` |
 
 供体只做对比度归一化（或纯底色偏移）和羽化，**不缩放、不锐化、不重新描边**。
 
@@ -348,6 +354,13 @@ python3 scripts/scan_edit_ops.py package \
 ```
 
 不给 `--page-size` 时按 `--dpi`（默认 300）从图像尺寸推算。
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `--page-size` | 页面点尺寸 `W,H`（须两个有限正数；非法输入退出码 2） | 按 dpi 推算 |
+| `--dpi` | 无 `--page-size` 时用于推算；须为正整数（`<=0` 退出码 2） | 300 |
+| `--original-pdf` | 若给出则走替换内嵌图模式（保留 OCR）；多图页面按覆盖面积选整页图，全空 rect / 头部并列时会报错 | 无 |
+| `--page-index` | 替换模式下的页码（0-based） | 0 |
 
 ### 方式二：替换内嵌图（PyMuPDF，保留 OCR 层）
 

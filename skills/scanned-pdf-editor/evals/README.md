@@ -42,7 +42,9 @@ cd evals && python3 run_evals.py --filter baseline  # 只跑基线对比
 ```
 evals/
 ├── eval_cases.json   # eval 用例定义
-├── run_evals.py      # 运行器
+├── run_evals.py      # 运行器（确定性自检，不跑真实模型）
+├── EVAL.md           # 真实模型 with/without-skill 评测指南
+├── evals.json        # skill-creator 风格用例（交互式）
 └── README.md         # 本文件
 ```
 

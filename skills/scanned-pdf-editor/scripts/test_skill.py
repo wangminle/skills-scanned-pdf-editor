@@ -938,5 +938,526 @@ class TestBugFix017LargeEdge(unittest.TestCase):
             self.assertEqual(int(np.count_nonzero(fill == 0)), 0, f"box={box}")
 
 
+class TestBugFix020_027(unittest.TestCase):
+    """CHK-017 发现的 BUG-020 至 BUG-027 回归测试。
+
+    这些 bug 多数是"合法路径全过、越界/退化输入裸崩或静默出错"，
+    逐项锁定修复后的行为：越界报清晰错误、合法输入不受影响。
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        # 300×300 浅灰底 + 一条深色横带（y=100..130, x=50..250）
+        self.img = np.full((300, 300, 3), 240, dtype=np.uint8)
+        self.img[100:130, 50:250] = 60
+        # 合法供体：浅灰底 + 深色块
+        self.donor = self.img[0:30, 0:100].copy()
+        self.donor[5:25, 10:90] = 60
+        self.ref = self.img[100:130, 150:250]
+        self.bg = self.img[0:30, 0:100]
+
+    def _save_source(self, name="s.png"):
+        path = Path(self.tmpdir) / name
+        Image.fromarray(self.img).save(path)
+        return path
+
+    # ── BUG-020：越界移动必须报错，不得静默绕到页底 ──
+
+    def test_move_block_rejects_off_page_destination(self):
+        """shift_y ≥ y1 时目标 y 为负，旧实现负切片把块写到页底。"""
+        with self.assertRaisesRegex(ValueError, "越出页面"):
+            utils.move_block(
+                self.img, content_x=(50, 250), source_y=(100, 130), shift_y=150
+            )
+
+    def test_move_and_clear_rejects_off_page_destination(self):
+        with self.assertRaisesRegex(ValueError, "越出页面"):
+            utils.move_and_clear(
+                self.img, content_x=(50, 250), source_y=(100, 130), shift_y=150,
+                clear_boxes=[(50, 100, 250, 130)],
+            )
+
+    def test_move_block_valid_shift_lands_at_expected_rows(self):
+        """合法上移仍精确落在目标行，无页底伪影。"""
+        result, _ = utils.move_block(
+            self.img, content_x=(50, 250), source_y=(100, 130), shift_y=50
+        )
+        rows = np.where(np.any(result != self.img, axis=2))[0]
+        self.assertEqual(rows.min(), 50)
+        self.assertEqual(rows.max(), 129)  # 目标 50..80 + 清理带 80..130
+
+    # ── BUG-021：零对比度供体不得 ZeroDivisionError ──
+
+    def test_normalize_all_ink_donor_raises_clear_error(self):
+        all_ink = np.full((30, 100, 3), 60, dtype=np.uint8)
+        with self.assertRaisesRegex(ValueError, "对比度"):
+            utils.normalize_donor_patch(all_ink, self.ref, self.bg, mode="contrast")
+
+    def test_normalize_flat_donor_raises_clear_error(self):
+        flat = np.full((30, 100, 3), 120, dtype=np.uint8)
+        with self.assertRaisesRegex(ValueError, "对比度"):
+            utils.normalize_donor_patch(flat, self.ref, self.bg, mode="contrast")
+
+    def test_normalize_error_suggests_offset_mode(self):
+        all_ink = np.full((30, 100, 3), 60, dtype=np.uint8)
+        with self.assertRaisesRegex(ValueError, "offset"):
+            utils.normalize_donor_patch(all_ink, self.ref, self.bg, mode="contrast")
+
+    def test_normalize_offset_mode_unaffected_by_zero_contrast(self):
+        """offset 模式不做对比度除法，全墨迹供体仍可用。"""
+        all_ink = np.full((30, 100, 3), 60, dtype=np.uint8)
+        normalized, scale = utils.normalize_donor_patch(
+            all_ink, self.ref, self.bg, mode="offset"
+        )
+        self.assertEqual(scale, 1.0)
+        self.assertEqual(normalized.shape, all_ink.shape)
+
+    def test_normalize_valid_donor_still_works(self):
+        normalized, scale = utils.normalize_donor_patch(
+            self.donor, self.ref, self.bg, mode="contrast"
+        )
+        self.assertGreater(scale, 0)
+        self.assertEqual(normalized.shape, self.donor.shape)
+
+    # ── BUG-022：插值删除框越界裁剪而非崩溃 ──
+
+    def test_interpolate_box_past_bottom_edge_clips(self):
+        """bottom > 图高：只填界内部分，界外不变，无黑块。"""
+        result = utils.remove_regions_interpolate(self.img, [(50, 250, 250, 350)], seed=42)
+        fill = result[250:300, 50:250]
+        self.assertGreater(fill.min(), 0, "裁剪后的填底不应有纯黑像素")
+        self.assertTrue(np.array_equal(result[:250], self.img[:250]), "框外不应变化")
+
+    def test_interpolate_box_fully_outside_image_is_noop(self):
+        result = utils.remove_regions_interpolate(self.img, [(500, 500, 600, 600)], seed=42)
+        self.assertTrue(np.array_equal(result, self.img))
+
+    def test_interpolate_in_bounds_behavior_unchanged(self):
+        """界内框行为与修复前一致：同 seed 确定性 + 无黑块。"""
+        r1 = utils.remove_regions_interpolate(self.img, [(50, 50, 250, 90)], seed=7)
+        r2 = utils.remove_regions_interpolate(self.img, [(50, 50, 250, 90)], seed=7)
+        self.assertTrue(np.array_equal(r1, r2))
+        self.assertGreater(r1[50:90, 50:250].min(), 0)
+
+    # ── BUG-023：贴入位置越界报清晰错误 ──
+
+    def test_paste_donor_out_of_bounds_raises(self):
+        with self.assertRaisesRegex(ValueError, "越出图像"):
+            utils.paste_donor_patch(self.img, self.donor, (280, 100), self.ref, self.bg)
+
+    def test_paste_donor_valid_destination_works(self):
+        result, scale = utils.paste_donor_patch(
+            self.img, self.donor, (100, 200), self.ref, self.bg
+        )
+        self.assertEqual(result.shape, self.img.shape)
+        self.assertGreater(scale, 0)
+
+    # ── BUG-024：--page-size 非法输入给清晰错误而非裸 IndexError ──
+
+    def test_package_page_size_single_value_rejected(self):
+        import scan_edit_ops as ops
+        src = self._save_source()
+        ret = ops.main([
+            "package", "--source", str(src),
+            "--output", str(Path(self.tmpdir) / "o.pdf"), "--page-size", "595.2",
+        ])
+        self.assertEqual(ret, 2)
+
+    def test_package_page_size_non_numeric_rejected(self):
+        import scan_edit_ops as ops
+        src = self._save_source()
+        ret = ops.main([
+            "package", "--source", str(src),
+            "--output", str(Path(self.tmpdir) / "o.pdf"), "--page-size", "abc,def",
+        ])
+        self.assertEqual(ret, 2)
+
+    def test_package_page_size_nan_rejected(self):
+        import scan_edit_ops as ops
+        src = self._save_source()
+        ret = ops.main([
+            "package", "--source", str(src),
+            "--output", str(Path(self.tmpdir) / "o.pdf"), "--page-size", "nan,800",
+        ])
+        self.assertEqual(ret, 2)
+
+    # ── BUG-025：空 ROI 取样与子目录输出 ──
+
+    def test_sample_ink_color_empty_box_raises(self):
+        import scan_text_fusion as stf
+        pil = Image.fromarray(self.img)
+        with self.assertRaisesRegex(ValueError, "没有交集"):
+            stf.sample_ink_color(pil, (500, 500, 600, 600), quiet=True)
+
+    def test_save_with_crop_creates_subdirectory(self):
+        """--output 含子目录成分（sub/x.png）时应自动建目录而非 FileNotFoundError。"""
+        import scan_text_fusion as stf
+        out_dir = Path(self.tmpdir) / "fusion_out"
+        full = stf.save_with_crop(
+            Image.fromarray(self.img), out_dir, "sub/x.png", (10, 10, 50, 50), "x_crop.png"
+        )
+        self.assertTrue(full.exists())
+        self.assertTrue((out_dir / "x_crop.png").exists())
+
+    # ── BUG-026：evals contrast 对照块的隐性 ValueError ──
+
+    def _load_run_evals(self):
+        import importlib.util
+        evals_dir = Path(__file__).parent.parent / "evals"
+        spec = importlib.util.spec_from_file_location(
+            "run_evals_for_test", evals_dir / "run_evals.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_evals_contrast_check_without_normalize_mode_fails_cleanly(self):
+        """旧实现在 case 未带 --normalize-mode 时 index() 先求值必炸 ValueError；
+        修复后应返回明确失败原因而不是异常。"""
+        run_evals = self._load_run_evals()
+        src = Path(self.tmpdir) / "eval_src.png"
+        Image.fromarray(run_evals.make_eval_image()).save(src)
+        case = {"id": "T-026", "category": "behavior", "mode": "replace",
+                "cli_args": {}, "validation": {"check_differs_from_contrast": True}}
+        ok, detail = run_evals.run_single_behavior(
+            case, "replace", {}, src, Path(self.tmpdir) / "o1.png",
+            run_evals.make_eval_image(),
+        )
+        self.assertFalse(ok)
+        self.assertIn("normalize-mode", detail)
+
+    def test_evals_contrast_check_with_offset_passes(self):
+        """BEH-006 原路径（offset 主跑 + contrast 对照）仍然通过。"""
+        run_evals = self._load_run_evals()
+        img = run_evals.make_eval_image()
+        src = Path(self.tmpdir) / "eval_src2.png"
+        Image.fromarray(img).save(src)
+        case = {"id": "T-026b", "category": "behavior", "mode": "replace",
+                "cli_args": {"normalize-mode": "offset"},
+                "validation": {"check_differs_from_contrast": True}}
+        ok, detail = run_evals.run_single_behavior(
+            case, "replace", {"normalize-mode": "offset"},
+            src, Path(self.tmpdir) / "o2.png", img,
+        )
+        self.assertTrue(ok, detail)
+
+    # ── BUG-027：ruff 门禁必须覆盖 evals/ ──
+
+    def test_run_checks_ruff_covers_evals_dir(self):
+        """run_checks.sh 的 ruff 实际命令须为 `ruff check ..`（忽略注释行）。"""
+        run_checks = (Path(__file__).parent / "run_checks.sh").read_text(encoding="utf-8")
+        cmd_lines = [
+            line.strip()
+            for line in run_checks.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        self.assertTrue(
+            any(line == "ruff check .." or line.startswith("ruff check .. ") for line in cmd_lines),
+            "run_checks.sh 须包含非注释命令 `ruff check ..`，否则 evals/ 会再次漏检",
+        )
+
+    def test_ruff_clean_over_whole_skill_dir(self):
+        """skill 根目录（scripts + evals）ruff 全清。"""
+        import shutil
+        import subprocess
+        if shutil.which("ruff") is None:
+            self.skipTest("本机未安装 ruff")
+        skill_dir = Path(__file__).parent.parent
+        completed = subprocess.run(
+            ["ruff", "check", str(skill_dir)], capture_output=True, text=True
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+
+class TestBugFix028_032(unittest.TestCase):
+    """BUG-028 至 BUG-032 回归测试（CHK-018 二次审查清单项）。
+
+    全部为"合法路径全过、退化输入裸崩或静默出错"类型，逐项锁定修复后的行为。
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    # ── BUG-028：parse_box 不校验坐标顺序，倒置/空框静默接受 ──
+
+    def test_parse_box_rejects_inverted_x(self):
+        """x2 < x1 的倒置框应被拒绝。"""
+        import argparse
+        import scan_edit_ops as ops
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, r"x1<x2|y1<y2"):
+            ops.parse_box("200,50,100,100")
+
+    def test_parse_box_rejects_inverted_y(self):
+        """y2 < y1 的倒置框应被拒绝。"""
+        import argparse
+        import scan_edit_ops as ops
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, r"x1<x2|y1<y2"):
+            ops.parse_box("50,200,100,100")
+
+    def test_parse_box_rejects_zero_area(self):
+        """x1==x2 或 y1==y2 的零面积框应被拒绝。"""
+        import argparse
+        import scan_edit_ops as ops
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, r"x1<x2|y1<y2|空框"):
+            ops.parse_box("50,50,50,100")
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, r"x1<x2|y1<y2|空框"):
+            ops.parse_box("50,50,100,50")
+
+    def test_parse_box_valid_box_accepted(self):
+        """合法框不受影响。"""
+        import scan_edit_ops as ops
+        self.assertEqual(ops.parse_box("50,50,100,100"), (50, 50, 100, 100))
+
+    # ── BUG-029：feather_mask(edge=0) 除零产生 NaN ──
+
+    def test_feather_mask_edge_zero_no_nan(self):
+        """edge=0 时角点 distance=0 处不产生 NaN，返回全 1 硬边蒙版。"""
+        mask = utils.feather_mask(10, 10, edge=0)
+        self.assertFalse(np.isnan(mask).any(), "edge=0 不应产生 NaN")
+        self.assertTrue(np.all(mask == 1.0), "edge=0 应返回全 1 蒙版")
+
+    def test_feather_mask_edge_negative_no_nan(self):
+        """edge<0 时不产生 NaN，返回全 1 硬边蒙版。"""
+        mask = utils.feather_mask(10, 10, edge=-1)
+        self.assertFalse(np.isnan(mask).any())
+        self.assertTrue(np.all(mask == 1.0))
+
+    def test_feather_mask_valid_edge_unchanged(self):
+        """合法 edge（>0）行为与旧版一致：角点=0、中心=1。"""
+        mask = utils.feather_mask(20, 20, edge=4)
+        self.assertAlmostEqual(float(mask[0, 0, 0]), 0.0)
+        self.assertAlmostEqual(float(mask[10, 10, 0]), 1.0)
+
+    # ── BUG-030：save_image_as_pdf 不校验 page_size，0/负数仍写出无效 PDF ──
+
+    def test_save_pdf_rejects_zero_page_size(self):
+        """page_size=(0,800) 应报 ValueError 而非写出 0×0 页面 PDF。"""
+        from PIL import Image as PI
+        img = PI.new("RGB", (100, 100), (200, 200, 200))
+        with self.assertRaises(ValueError):
+            utils.save_image_as_pdf(
+                img, Path(self.tmpdir) / "bad.pdf",
+                page_size=(0, 800), title="", subject="",
+            )
+
+    def test_save_pdf_rejects_negative_page_size(self):
+        from PIL import Image as PI
+        img = PI.new("RGB", (100, 100), (200, 200, 200))
+        with self.assertRaises(ValueError):
+            utils.save_image_as_pdf(
+                img, Path(self.tmpdir) / "bad.pdf",
+                page_size=(-1, 800), title="", subject="",
+            )
+
+    def test_save_pdf_rejects_nan_page_size(self):
+        from PIL import Image as PI
+        img = PI.new("RGB", (100, 100), (200, 200, 200))
+        with self.assertRaises(ValueError):
+            utils.save_image_as_pdf(
+                img, Path(self.tmpdir) / "bad.pdf",
+                page_size=(float("nan"), 800), title="", subject="",
+            )
+
+    def test_save_pdf_valid_page_size_works(self):
+        from PIL import Image as PI
+        img = PI.new("RGB", (100, 100), (200, 200, 200))
+        out = Path(self.tmpdir) / "ok.pdf"
+        utils.save_image_as_pdf(img, out, page_size=(595.2, 841.68), title="t", subject="s")
+        self.assertTrue(out.exists())
+
+    # ── BUG-031：smooth_noise 1×1 归一化除零产生 NaN ──
+
+    def test_smooth_noise_1x1_no_nan(self):
+        """1×1 退化形状（max==min）不产生 NaN，返回零场。"""
+        import scan_text_fusion as stf
+        rng = np.random.default_rng(42)
+        result = stf.smooth_noise((1, 1), rng, 1.0, 9.0)
+        self.assertFalse(np.isnan(result).any(), "1×1 不应产生 NaN")
+        self.assertTrue(np.all(result == 0.0), "1×1 应返回零场")
+
+    def test_smooth_noise_normal_shape_unchanged(self):
+        """合法形状的输出不含 NaN 且有正常变异。"""
+        import scan_text_fusion as stf
+        rng = np.random.default_rng(42)
+        result = stf.smooth_noise((100, 100), rng, 1.15, 0.18)
+        self.assertFalse(np.isnan(result).any())
+        self.assertGreater(float(result.std()), 0.0)
+
+    # ── BUG-032：_select_page_image_xref 全空 rect 静默返回无效 xref ──
+
+    def test_xref_rejects_all_empty_rects(self):
+        """所有内嵌图的渲染矩形均为空（ratio=0）时应报错而非静默返回。"""
+
+        class MockRect:
+            def __init__(self, w, h):
+                self.width = w
+                self.height = h
+
+        class MockPage:
+            def __init__(self, page_wh, images):
+                self.rect = MockRect(*page_wh)
+                self._images = images
+
+            def get_image_rects(self, xref):
+                return []  # 所有图都返回空 rect
+
+        images = [(1, 0), (2, 0)]
+        mock_page = MockPage((100, 100), images)
+        with self.assertRaisesRegex(RuntimeError, "渲染矩形均为空"):
+            utils._select_page_image_xref(mock_page, images, strict=True)
+
+    def test_xref_normal_images_unaffected(self):
+        """正常多图页面仍选出覆盖比例最大的整页图。"""
+
+        class MockRect:
+            def __init__(self, w, h):
+                self.width = w
+                self.height = h
+
+        class MockPage:
+            def __init__(self, page_wh, images):
+                self.rect = MockRect(*page_wh)
+                self._images = images
+
+            def get_image_rects(self, xref):
+                if xref == 1:
+                    return [MockRect(10, 10)]
+                return [MockRect(100, 100)]
+
+        images = [(1, 0), (2, 0)]
+        mock_page = MockPage((100, 100), images)
+        selected = utils._select_page_image_xref(mock_page, images, strict=True)
+        self.assertEqual(selected, 2, "应选出整页图 xref=2")
+
+    def test_xref_single_image_empty_rect_still_returns(self):
+        """单图早退：即使 rect 为空仍返回唯一 xref（文档化行为，非静默多选）。"""
+
+        class MockRect:
+            def __init__(self, w, h):
+                self.width = w
+                self.height = h
+
+        class MockPage:
+            def __init__(self):
+                self.rect = MockRect(100, 100)
+
+            def get_image_rects(self, xref):
+                return []
+
+        selected = utils._select_page_image_xref(MockPage(), [(9, 0)], strict=True)
+        self.assertEqual(selected, 9)
+
+
+class TestBugFix033_035(unittest.TestCase):
+    """BUG-033～035：CHK-020 复核发现的同族残留。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.img = np.full((100, 100, 3), 240, dtype=np.uint8)
+        self.img[40:60, 20:80] = 50
+
+    def _save_source(self, name="s.png"):
+        path = Path(self.tmpdir) / name
+        Image.fromarray(self.img).save(path)
+        return path
+
+    # ── BUG-033：倒置/零高 source_y、倒置 content_x 不得静默改图 ──
+
+    def test_move_block_rejects_inverted_source_y(self):
+        with self.assertRaisesRegex(ValueError, r"source_y|y1.*y2|坐标"):
+            utils.move_block(
+                self.img, content_x=(20, 80), source_y=(60, 40), shift_y=10
+            )
+
+    def test_move_block_rejects_zero_height_source_y(self):
+        with self.assertRaisesRegex(ValueError, r"source_y|y1.*y2|坐标"):
+            utils.move_block(
+                self.img, content_x=(20, 80), source_y=(40, 40), shift_y=10
+            )
+
+    def test_move_block_rejects_inverted_content_x(self):
+        with self.assertRaisesRegex(ValueError, r"content_x|x1.*x2|坐标"):
+            utils.move_block(
+                self.img, content_x=(80, 20), source_y=(40, 60), shift_y=10
+            )
+
+    def test_move_and_clear_rejects_inverted_source_y(self):
+        with self.assertRaisesRegex(ValueError, r"source_y|y1.*y2|坐标"):
+            utils.move_and_clear(
+                self.img,
+                content_x=(20, 80),
+                source_y=(60, 40),
+                shift_y=10,
+                clear_boxes=[(20, 40, 80, 60)],
+            )
+
+    def test_parse_ordered_pair_rejects_inverted(self):
+        import argparse
+        import scan_edit_ops as ops
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, r"a<b|起止"):
+            ops.parse_ordered_pair("80,20")
+
+    def test_parse_ordered_pair_accepts_valid(self):
+        import scan_edit_ops as ops
+        self.assertEqual(ops.parse_ordered_pair("20,80"), (20, 80))
+
+    def test_parse_pair_destination_allows_any_order(self):
+        """destination 是点坐标，不应强制 a<b。"""
+        import scan_edit_ops as ops
+        self.assertEqual(ops.parse_pair("80,20"), (80, 20))
+
+    # ── BUG-034：contrast 主跑不得做无意义对照 ──
+
+    def _load_run_evals(self):
+        import importlib.util
+        evals_dir = Path(__file__).parent.parent / "evals"
+        spec = importlib.util.spec_from_file_location(
+            "run_evals_for_test_033", evals_dir / "run_evals.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_evals_contrast_primary_fails_contract(self):
+        run_evals = self._load_run_evals()
+        img = run_evals.make_eval_image()
+        src = Path(self.tmpdir) / "eval_contrast.png"
+        Image.fromarray(img).save(src)
+        ok, detail = run_evals.run_single_behavior(
+            {"id": "T-034", "mode": "replace",
+             "validation": {"check_differs_from_contrast": True}},
+            "replace",
+            {"normalize-mode": "contrast"},
+            src,
+            Path(self.tmpdir) / "o_contrast.png",
+            img,
+        )
+        self.assertFalse(ok)
+        self.assertIn("normalize-mode", detail)
+        self.assertNotIn("offset 与 contrast 输出相同", detail)
+
+    # ── BUG-035：--dpi <=0 清晰 exit 2 ──
+
+    def test_package_dpi_zero_rejected(self):
+        import scan_edit_ops as ops
+        src = self._save_source()
+        ret = ops.main([
+            "package", "--source", str(src),
+            "--output", str(Path(self.tmpdir) / "bad_dpi.pdf"),
+            "--dpi", "0",
+        ])
+        self.assertEqual(ret, 2)
+
+    def test_package_dpi_negative_rejected(self):
+        import scan_edit_ops as ops
+        src = self._save_source()
+        ret = ops.main([
+            "package", "--source", str(src),
+            "--output", str(Path(self.tmpdir) / "bad_dpi_neg.pdf"),
+            "--dpi", "-72",
+        ])
+        self.assertEqual(ret, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

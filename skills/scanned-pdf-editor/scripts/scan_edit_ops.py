@@ -45,7 +45,15 @@ def parse_box(s: str) -> utils.Box:
     parts = s.replace(" ", "").split(",")
     if len(parts) != 4:
         raise argparse.ArgumentTypeError(f"坐标格式应为 x1,y1,x2,y2，收到: {s}")
-    return tuple(int(p) for p in parts)
+    box = tuple(int(p) for p in parts)
+    x1, y1, x2, y2 = box
+    # BUG-028：倒置框（x2<x1 或 y2<y1）静默接受后产生空切片，删除等操作无效果。
+    if x1 >= x2 or y1 >= y2:
+        raise argparse.ArgumentTypeError(
+            f"坐标需满足 x1<x2 且 y1<y2，收到: {s}（解析为 {box}）。"
+            "请检查是否写反了起止点或输入了空框。"
+        )
+    return box
 
 
 def parse_boxes(s: str) -> list[utils.Box]:
@@ -53,10 +61,26 @@ def parse_boxes(s: str) -> list[utils.Box]:
 
 
 def parse_pair(s: str) -> tuple[int, int]:
+    """解析点坐标或无序二元组（如 --destination x,y）。不强制 a<b。"""
     parts = s.replace(" ", "").split(",")
     if len(parts) != 2:
         raise argparse.ArgumentTypeError(f"格式应为 a,b，收到: {s}")
     return tuple(int(p) for p in parts)
+
+
+def parse_ordered_pair(s: str) -> tuple[int, int]:
+    """解析有序区间 a,b，要求 a<b（如 --content-x / --source-y）。
+
+    BUG-033：倒置/零宽区间若仅靠库函数兜底，CLI 仍会先跑到半截；与 parse_box 对齐。
+    """
+    pair = parse_pair(s)
+    a, b = pair
+    if a >= b:
+        raise argparse.ArgumentTypeError(
+            f"区间需满足 a<b，收到: {s}（解析为 {pair}）。"
+            "请检查是否写反了起止点。"
+        )
+    return pair
 
 
 def load_rgb(path: Path) -> np.ndarray:
@@ -113,6 +137,11 @@ def cmd_remove(args: argparse.Namespace) -> int:
         result = utils.remove_regions_interpolate(
             source, boxes, noise_sigma=args.noise_sigma, seed=args.seed
         )
+        if args.save_mask:
+            print(
+                "注意: interpolate 方法不产生蒙版，--save-mask 仅对 telea 生效，已忽略。",
+                file=sys.stderr,
+            )
 
     save_with_preview(result, args.output, args.crop_box)
 
@@ -134,8 +163,8 @@ def cmd_remove(args: argparse.Namespace) -> int:
 
 def cmd_move(args: argparse.Namespace) -> int:
     source = load_rgb(args.source)
-    content_x = parse_pair(args.content_x)
-    source_y = parse_pair(args.source_y)
+    content_x = parse_ordered_pair(args.content_x)
+    source_y = parse_ordered_pair(args.source_y)
     shift_y = args.shift_y
 
     cleanup_boxes = None
@@ -212,8 +241,8 @@ def cmd_compound(args: argparse.Namespace) -> int:
     适用于 task007 类"先复制再清除"的复合流程（G6）。
     """
     source = load_rgb(args.source)
-    content_x = parse_pair(args.content_x)
-    source_y = parse_pair(args.source_y)
+    content_x = parse_ordered_pair(args.content_x)
+    source_y = parse_ordered_pair(args.source_y)
     clear_boxes = [parse_box(b) for b in args.clear_boxes]
 
     result = utils.move_and_clear(
@@ -305,11 +334,34 @@ def cmd_package(args: argparse.Namespace) -> int:
         )
     else:
         if args.page_size:
+            # BUG-024：数值个数不对或非数字时，原先裸抛 IndexError/ValueError。
             parts = args.page_size.replace(" ", "").split(",")
-            page_size = (float(parts[0]), float(parts[1]))
+            try:
+                if len(parts) != 2:
+                    raise ValueError
+                page_w, page_h = float(parts[0]), float(parts[1])
+                if not (np.isfinite(page_w) and np.isfinite(page_h)):
+                    raise ValueError
+                if page_w <= 0 or page_h <= 0:
+                    raise ValueError
+                page_size = (page_w, page_h)
+            except ValueError:
+                print(
+                    f"错误: --page-size 需要 W,H 两个数值（如 595.2,841.68），"
+                    f"收到: {args.page_size!r}",
+                    file=sys.stderr,
+                )
+                return 2
         else:
             # 按图像尺寸和 dpi 推算页面点尺寸
+            # BUG-035：dpi<=0 会 ZeroDivisionError / 负 page_size 裸崩，与 --page-size 同样给 exit 2。
             dpi = args.dpi
+            if dpi is None or dpi <= 0:
+                print(
+                    f"错误: --dpi 需为正整数（用于从图像推算页面尺寸），收到: {args.dpi!r}",
+                    file=sys.stderr,
+                )
+                return 2
             page_size = (image.width * 72.0 / dpi, image.height * 72.0 / dpi)
         utils.save_image_as_pdf(
             image, args.output,
@@ -354,8 +406,8 @@ def build_parser() -> argparse.ArgumentParser:
     # move
     pm = sub.add_parser("move", help="移动像素块并清理残留")
     pm.add_argument("--source", type=Path, required=True, help="源图片路径")
-    pm.add_argument("--content-x", required=True, help="横向范围 x1,x2")
-    pm.add_argument("--source-y", required=True, help="纵向范围 y1,y2")
+    pm.add_argument("--content-x", required=True, help="横向范围 x1,x2（须 x1<x2）")
+    pm.add_argument("--source-y", required=True, help="纵向范围 y1,y2（须 y1<y2）")
     pm.add_argument("--shift-y", type=int, required=True, help="上移像素数（正值=上移）")
     pm.add_argument("--cleanup-ink-threshold", type=int, default=246, help="残留清理墨迹阈值（默认 246）")
     pm.add_argument("--cleanup-boxes", nargs="+", help="手动指定清理区域（不给则自动用源区域尾部）")
@@ -372,7 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--remove-boxes", nargs="+", required=True, help="目标清理框（可多个）")
     pe.add_argument("--destination", required=True, help="贴入左上角 x,y")
     pe.add_argument("--reference-box", required=True, help="目标行参考字框 x1,y1,x2,y2")
-    pe.add_argument("--feather", type=int, default=4, help="羽化宽度（默认 4）")
+    pe.add_argument("--feather", type=int, default=4, help="羽化宽度（默认 4；<=0 为硬边）")
     pe.add_argument("--ink-threshold", type=int, default=180, help="清理墨迹阈值（默认 180）")
     pe.add_argument("--mask-mode", choices=["ink", "full"], default="ink",
                     help="清理蒙版模式：ink=墨迹蒙版（默认），full=整矩形蒙版（G2）")
@@ -386,8 +438,8 @@ def build_parser() -> argparse.ArgumentParser:
     # compound
     pc = sub.add_parser("compound", help="复合操作：复制源块→清除多个区域→粘贴源块到新位置")
     pc.add_argument("--source", type=Path, required=True, help="源图片路径")
-    pc.add_argument("--content-x", required=True, help="移动区域横向范围 x1,x2")
-    pc.add_argument("--source-y", required=True, help="移动区域纵向范围 y1,y2")
+    pc.add_argument("--content-x", required=True, help="移动区域横向范围 x1,x2（须 x1<x2）")
+    pc.add_argument("--source-y", required=True, help="移动区域纵向范围 y1,y2（须 y1<y2）")
     pc.add_argument("--shift-y", type=int, required=True, help="上移像素数（正值=上移）")
     pc.add_argument("--clear-boxes", nargs="+", required=True,
                     help="需清除的所有区域 x1,y1,x2,y2（可多个，通常含源区域本身）")
@@ -415,8 +467,8 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--output", type=Path, required=True, help="输出 PDF 路径")
     pp.add_argument("--original-pdf", type=Path,
                     help="原始 PDF 路径（给出则用 replace_image 保留 OCR 层；不给则新建 PDF）")
-    pp.add_argument("--page-size", help="页面点尺寸 W,H（不给则按 --dpi 从图像推算）")
-    pp.add_argument("--dpi", type=int, default=300, help="推算页面尺寸用的 dpi（默认 300）")
+    pp.add_argument("--page-size", help="页面点尺寸 W,H（两个正数；不给则按 --dpi 从图像推算）")
+    pp.add_argument("--dpi", type=int, default=300, help="推算页面尺寸用的 dpi（须为正整数，默认 300）")
     pp.add_argument("--page-index", type=int, default=0, help="替换内嵌图的页码（默认 0）")
     pp.add_argument("--title", help="PDF 标题元数据")
     pp.add_argument("--subject", help="PDF 主题元数据")

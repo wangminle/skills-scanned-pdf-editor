@@ -1,7 +1,12 @@
 # scanned-pdf-editor
 
+**版本：V0.1.1**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
+
 扫描版 PDF / 扫描件图片的局部编辑技能：删除指定内容、移动正文位置、替换已有文字、补录新增文字，
 使修改区域的像素与原扫描件的字体、字号、墨色、纸纹、扫描噪点风格一致。
+
+> 坐标约定：框与区间一律要求有序（`x1<x2`、`y1<y2`；`--content-x` / `--source-y` 亦同）。
+> `package --page-size` 须为正数对；无 `--page-size` 时 `--dpi` 须为正整数。详情见 `SKILL.md`。
 
 ## 快速开始
 
@@ -62,6 +67,7 @@ pip3 install -r scripts/requirements.txt
 ## 文件结构
 
 ```
+evals/                     确定性行为自检 + EVAL.md 真实模型评测指南
 scripts/
   font_registry.py        跨平台 CJK 字体注册表
   identify_font.py         字体识别（灰度 NCC + 多字聚合）
@@ -71,7 +77,7 @@ scripts/
   scan_text_fusion.py      扫描融合 + 蓝灰晕染（增加文字路线）
   verify_outputs.py        泛化验证框架（JSON 配置驱动）
   test_skill.py            自测
-  run_checks.sh            回归门禁（ruff + pytest）
+  run_checks.sh            回归门禁（ruff scripts+evals + pytest）
   requirements.txt         Python 依赖
 references/
   pipeline_methodology.md  方法论参考（原理、视觉判断、参数安全范围）
