@@ -1,12 +1,14 @@
 # scanned-pdf-editor
 
-**版本：V0.1.1**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
+**版本：V0.1.2**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
 
 扫描版 PDF / 扫描件图片的局部编辑技能：删除指定内容、移动正文位置、替换已有文字、补录新增文字，
 使修改区域的像素与原扫描件的字体、字号、墨色、纸纹、扫描噪点风格一致。
 
-> 坐标约定：框与区间一律要求有序（`x1<x2`、`y1<y2`；`--content-x` / `--source-y` 亦同）。
-> `package --page-size` 须为正数对；无 `--page-size` 时 `--dpi` 须为正整数。详情见 `SKILL.md`。
+> 坐标约定：框与区间一律非负且有序（`x1<x2`、`y1<y2`；`--content-x` / `--source-y` 亦同）；
+> 负坐标会报错，不会静默回绕。`move` 的内容区须完整落在图内（x/y 均校验）。
+> `package --page-size` 须为正数对；无 `--page-size` 时 `--dpi` 须为正整数；
+> `--page-index` 须在页码范围内。详情见 `SKILL.md`。
 
 ## 快速开始
 

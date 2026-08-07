@@ -66,6 +66,20 @@ SCAN_STYLE_DEFAULTS = {
 
 
 # ───────────────────────────── 基础工具 ─────────────────────────────
+def validate_box(box: Sequence[int], name: str) -> tuple[int, int, int, int]:
+    """校验 4 元组坐标：非负 + x1<x2 + y1<y2。
+
+    BUG-051：--reference-box / --sample-only / --crop-box 用 type=int 直接接收，
+    负坐标会在 numpy 切片 / PIL crop 中静默回绕或截断到错误区域（与 BUG-037 同族）。
+    """
+    x1, y1, x2, y2 = box
+    if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0:
+        raise SystemExit(f"错误: --{name} 坐标需全部非负（像素坐标），收到: {list(box)}。")
+    if x1 >= x2 or y1 >= y2:
+        raise SystemExit(f"错误: --{name} 坐标需满足 x1<x2 且 y1<y2，收到: {list(box)}。")
+    return (x1, y1, x2, y2)
+
+
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -222,7 +236,13 @@ def render_halo(base_with_text: Image.Image, *, text: str, position: tuple[int, 
 
     rng = np.random.default_rng(seeds["halo"])
     low = rng.normal(0, 1, halo.shape).astype(np.float32)
-    low = (low - low.min()) / (low.max() - low.min())
+    # BUG-045：与 smooth_noise（BUG-031）同族的除零——1×1 退化形状时
+    # low.max()==low.min()，归一化除零产生 NaN，经 uint8 静默归零。加 span==0 守卫。
+    span = float(low.max() - low.min())
+    if span == 0.0:
+        low = np.zeros_like(low)
+    else:
+        low = (low - low.min()) / span
     low_img = Image.fromarray(np.uint8(low * 255), "L").filter(ImageFilter.GaussianBlur(0.95))
     low = np.asarray(low_img).astype(np.float32) / 255.0
     fine = rng.normal(0, 0.22, halo.shape).astype(np.float32)
@@ -368,7 +388,8 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
 
     # 颜色：参考框取样 > 显式 ink-color > 默认
     if args.reference_box:
-        ink_color = sample_ink_color(base, tuple(args.reference_box), quiet=False)
+        ref_box = validate_box(args.reference_box, "reference-box")
+        ink_color = sample_ink_color(base, ref_box, quiet=False)
         print(f"sampled ink color: {ink_color}")
     else:
         ink_color = tuple(args.ink_color)
@@ -376,7 +397,7 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     halo_color = tuple(args.halo_color)
 
     # crop 框
-    crop_box = tuple(args.crop_box) if args.crop_box else auto_crop_box(
+    crop_box = validate_box(args.crop_box, "crop-box") if args.crop_box else auto_crop_box(
         tuple(args.position), base.size, args.text, args.font_size)
 
     stem = source.stem
@@ -417,12 +438,20 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
     # 若给了 --reference-box，首格放原扫描参考字裁剪，便于人眼直接对比"噪点/毛刺"是否一致。
     if args.variants:
         if args.fusion_variants:
-            strengths = [float(x) for x in args.fusion_variants.split(",")]
+            # BUG-046：尾逗号（如 "0.5,0.7,"）会让 split 产生空串，float("") 裸 traceback。
+            # 过滤空段并校验为有限正数。
+            raw = [x.strip() for x in args.fusion_variants.split(",") if x.strip()]
+            if not raw:
+                raise SystemExit(f"错误: --fusion-variants 未给出有效强度，收到: {args.fusion_variants!r}")
+            try:
+                strengths = [float(x) for x in raw]
+            except ValueError:
+                raise SystemExit(f"错误: --fusion-variants 需为逗号分隔的数值，收到: {args.fusion_variants!r}")
         else:
             strengths = SCAN_STYLE_DEFAULTS[args.scan_style]["variants"]
         panels: list[tuple[str, Image.Image]] = []
         if args.reference_box:
-            panels.append(("scan 参考（原扫描字）", base.crop(tuple(args.reference_box))))
+            panels.append(("scan 参考（原扫描字）", base.crop(ref_box)))
         for s in strengths:
             var_fu = render_scan_fusion(base, text=args.text, position=tuple(args.position),
                                         font=font, ink_color=ink_color, seed=args.seed, strength=s,
@@ -510,7 +539,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source = Path(args.source)
         if not source.exists():
             raise FileNotFoundError(f"Source image not found: {source}")
-        sample_ink_color(load_rgb(source), tuple(args.sample_only), quiet=False)
+        sample_ink_color(load_rgb(source), validate_box(args.sample_only, "sample-only"), quiet=False)
         return 0
 
     # --sample-only 已 return；其余模式都需要 --position

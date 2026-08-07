@@ -1,6 +1,6 @@
 # skills-scanned-pdf-editor
 
-**Version: V0.1.1** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
+**Version: V0.1.2** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
 
 [English](#english) | [中文](#中文)
 
@@ -50,7 +50,7 @@ Two technical routes share the same goal (“looks like the original scan”):
 ```
 .
 ├── README.md                 # This file (repo overview)
-├── VERSION                   # Current release id (V0.1.1-…)
+├── VERSION                   # Current version (V0.1.2)
 ├── CHANGELOG.md              # Release notes
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Session conventions for agents
@@ -217,7 +217,7 @@ Real with-skill / without-skill model evaluation is documented in [`evals/EVAL.m
 ```
 .
 ├── README.md                 # 本文件（仓库总览）
-├── VERSION                   # 当前版本号（V0.1.1-…）
+├── VERSION                   # 当前版本号（V0.1.2）
 ├── CHANGELOG.md              # 版本说明
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Agent 会话约定

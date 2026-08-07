@@ -93,8 +93,11 @@ def find_font(spec: str | None) -> tuple[str, int] | None:
     if os.path.exists(spec):
         return (spec, 0)
     spec_l = spec.lower()
+    # BUG-044：旧实现 `spec in name` 大小写敏感——find_font("Songti") 命中注册名
+    # "Songti SC" 而 find_font("songti") 返回 None，与文件名匹配的 lower() 行为不一致。
+    # 注册名也统一按小写比较，与文件名匹配行为对齐。
     for name, (fn, idx) in CJK_FONTS.items():
-        if spec in name or fn.lower() == spec_l:
+        if spec_l in name.lower() or fn.lower() == spec_l:
             p = resolve_font(fn)
             if p:
                 return (p, idx)

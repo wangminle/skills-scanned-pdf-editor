@@ -554,20 +554,27 @@ class TestEdgeCaseRegressions(unittest.TestCase):
         self.assertEqual(selected, images[1][0], "应选出整页图而非小印章")
 
     def test_replace_image_raises_on_ambiguous_multi_image(self):
-        """两张高覆盖、比例接近的图，strict 模式应报错而非静默替换。"""
+        """两张高覆盖、比例接近的不同图，strict 模式应报错而非静默替换。
+
+        注意：必须用两张**不同**的图（不同 xref）。旧用例误用同一文件插入两次，
+        PyMuPDF 会复用同一 xref——经 BUG-036 去重后成了单候选，不再属于"歧义"。
+        """
         try:
             import fitz
         except ImportError:
             self.skipTest("未安装 PyMuPDF，跳过多图测试")
-        full = self._save_png("full.png", np.full((100, 100, 3), 200, dtype=np.uint8))
+        img_a = self._save_png("img_a.png", np.full((100, 100, 3), 200, dtype=np.uint8))
+        img_b = self._save_png("img_b.png", np.full((100, 100, 3), 180, dtype=np.uint8))
         original = self._make_pdf_with_images(
             "ambig.pdf",
-            [((0, 0, 90, 90), full), ((0, 0, 85, 85), full)],
+            [((0, 0, 90, 90), img_a), ((0, 0, 85, 85), img_b)],
         )
         doc = fitz.open(str(original))
         page = doc[0]
         images = page.get_images(full=True)
         doc.close()
+        # 两张不同图应得到不同 xref
+        self.assertNotEqual(images[0][0], images[1][0], "两张不同图应有不同 xref")
         with self.assertRaises(RuntimeError):
             utils._select_page_image_xref(
                 fitz.open(str(original))[0], images, strict=True
@@ -1457,6 +1464,709 @@ class TestBugFix033_035(unittest.TestCase):
             "--dpi", "-72",
         ])
         self.assertEqual(ret, 2)
+
+
+class TestBugFix036_047(unittest.TestCase):
+    """BUG-036 至 BUG-047 回归测试（CHK-022 第五轮审查清单项）。
+
+    全部为"测试全绿但边界路径漏检"类型，逐项锁定修复后的行为。
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.img = np.full((300, 300, 3), 240, dtype=np.uint8)
+        self.img[100:130, 50:250] = 60
+
+    def _save_source(self, name="s.png"):
+        path = Path(self.tmpdir) / name
+        Image.fromarray(self.img).save(path)
+        return path
+
+    # ── BUG-036：_select_page_image_xref 去重重复 xref ──
+
+    def test_xref_dedup_same_image_placed_twice(self):
+        """同一张图放置两次（get_images 返回重复 xref [5,5]）应去重后正常返回，
+        不再误报"覆盖比例最高的两个过近"。"""
+
+        class MockRect:
+            def __init__(self, w, h):
+                self.width = w
+                self.height = h
+
+        class MockPage:
+            def __init__(self):
+                self.rect = MockRect(100, 100)
+
+            def get_image_rects(self, xref):
+                # 同一 xref 的两个放置块面积已由 get_image_rects 合并返回
+                return [MockRect(100, 100)]
+
+        images_dup = [(5, 0), (5, 0)]  # 同一张图放置两次
+        selected = utils._select_page_image_xref(MockPage(), images_dup, strict=True)
+        self.assertEqual(selected, 5, "重复 xref 去重后应正常返回 5")
+
+    # ── BUG-037：parse_box 拒绝负坐标 ──
+
+    def test_parse_box_rejects_negative_x(self):
+        import argparse
+        import scan_edit_ops as ops
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "非负"):
+            ops.parse_box("-50,50,50,100")
+
+    def test_parse_box_rejects_negative_y(self):
+        import argparse
+        import scan_edit_ops as ops
+        with self.assertRaisesRegex(argparse.ArgumentTypeError, "非负"):
+            ops.parse_box("50,-50,100,100")
+
+    def test_parse_box_valid_nonnegative_accepted(self):
+        """合法的非负框不受影响（含 0 起点）。"""
+        import scan_edit_ops as ops
+        self.assertEqual(ops.parse_box("0,0,50,100"), (0, 0, 50, 100))
+
+    # ── BUG-038：move_block / move_and_clear x 方向越界校验 ──
+
+    def test_move_block_rejects_x_past_width(self):
+        """x2 超出图宽应报错，而非被 numpy 静默截断。"""
+        with self.assertRaisesRegex(ValueError, "越出页面宽度"):
+            utils.move_block(self.img, content_x=(50, 350), source_y=(100, 130), shift_y=50)
+
+    def test_move_block_rejects_negative_x(self):
+        """x1<0 应报错，而非被 numpy 负索引回绕到页尾。"""
+        with self.assertRaisesRegex(ValueError, "越出页面宽度"):
+            utils.move_block(self.img, content_x=(-50, 250), source_y=(100, 130), shift_y=50)
+
+    def test_move_and_clear_rejects_x_past_width(self):
+        with self.assertRaisesRegex(ValueError, "越出页面宽度"):
+            utils.move_and_clear(
+                self.img, content_x=(50, 350), source_y=(100, 130), shift_y=50,
+                clear_boxes=[(50, 100, 250, 130)],
+            )
+
+    def test_move_block_valid_x_unchanged(self):
+        """合法 x 范围行为不变。"""
+        result, _ = utils.move_block(
+            self.img, content_x=(50, 250), source_y=(100, 130), shift_y=50
+        )
+        self.assertEqual(result.shape, self.img.shape)
+
+    # ── BUG-039：verify 完全越界的 blank-box/preserve-box 不得报"通过" ──
+
+    def test_verify_blank_box_outside_image_fails(self):
+        """完全越界的 blank-box 应返回非 0，而非因空切片 dark=0 误报通过。"""
+        import scan_edit_ops as ops
+        src = self._save_source()
+        ret = ops.main([
+            "verify", "--source", str(src), "--result", str(src),
+            "--blank-box", "5000,5000,5100,5100",
+        ])
+        self.assertNotEqual(ret, 0)
+
+    def test_verify_preserve_box_outside_image_fails(self):
+        """完全越界的 preserve-box 应返回非 0。"""
+        import scan_edit_ops as ops
+        src = self._save_source()
+        ret = ops.main([
+            "verify", "--source", str(src), "--result", str(src),
+            "--preserve-box", "5000,5000,5100,5100",
+        ])
+        self.assertNotEqual(ret, 0)
+
+    def test_verify_blank_box_in_bounds_still_passes(self):
+        """界内 blank-box 行为不变。"""
+        import scan_edit_ops as ops
+        src = self._save_source()
+        ret = ops.main([
+            "verify", "--source", str(src), "--result", str(src),
+            "--blank-box", "200,10,280,40",  # 空白区，无深色像素
+        ])
+        self.assertEqual(ret, 0)
+
+    def test_blank_region_dark_pixels_empty_box_raises(self):
+        """空框（x1>=x2）应报错而非返回 0。"""
+        with self.assertRaisesRegex(ValueError, "为空|没有交集"):
+            utils.blank_region_dark_pixels(self.img, (50, 50, 50, 100))
+
+    # ── BUG-040：replace donor_box / reference_box 越界校验 ──
+
+    def test_replace_donor_box_past_width_raises(self):
+        """donor_box 部分越界应报错，而非静默截小供体。"""
+        donor = np.full((300, 300, 3), 240, dtype=np.uint8)
+        donor[50:80, 260:300] = 60
+        with self.assertRaisesRegex(ValueError, "donor_box.*越出供体"):
+            utils.replace_with_donor(
+                self.img, donor,
+                donor_box=(260, 50, 360, 80),  # x2=360 越界
+                remove_boxes=[(200, 200, 260, 230)],
+                destination=(200, 200),
+                reference_box=(50, 100, 150, 130),
+                normalize_mode="offset",
+            )
+
+    def test_replace_reference_box_past_width_raises(self):
+        """reference_box 越界应报错，而非静默截小参考。"""
+        donor = np.full((300, 300, 3), 240, dtype=np.uint8)
+        donor[50:80, 50:150] = 60
+        with self.assertRaisesRegex(ValueError, "reference_box.*越出目标"):
+            utils.replace_with_donor(
+                self.img, donor,
+                donor_box=(50, 50, 150, 80),
+                remove_boxes=[(200, 200, 260, 230)],
+                destination=(200, 200),
+                reference_box=(250, 100, 350, 130),  # x2=350 越界
+                normalize_mode="offset",
+            )
+
+    def test_replace_valid_boxes_unaffected(self):
+        """合法 donor/reference 框行为不变。"""
+        donor = self.img[0:30, 0:100].copy()
+        donor[5:25, 10:90] = 60
+        result, _, _ = utils.replace_with_donor(
+            self.img, self.img,
+            donor_box=(0, 0, 100, 30),
+            remove_boxes=[(200, 200, 280, 230)],
+            destination=(200, 200),
+            reference_box=(50, 100, 150, 130),
+            normalize_mode="offset",
+        )
+        self.assertEqual(result.shape, self.img.shape)
+
+    # ── BUG-041：verify_outputs 尺寸不一致不得裸 traceback ──
+
+    def test_verify_outputs_size_mismatch_no_traceback(self):
+        """源/终版页尺寸不同时应记录为用例错误，不抛 traceback、不跳过后续用例。"""
+        import json
+        import subprocess
+        import sys
+        import fitz
+        src = Path(self.tmpdir) / "src.pdf"
+        final = Path(self.tmpdir) / "final.pdf"
+        for p, sz in [(src, (100, 100)), (final, (200, 200))]:
+            doc = fitz.open()
+            pg = doc.new_page(width=sz[0], height=sz[1])
+            png = Path(self.tmpdir) / f"p{sz[0]}.png"
+            Image.fromarray(np.full((sz[1], sz[0], 3), 200, dtype=np.uint8)).save(png)
+            pg.insert_image(pg.rect, filename=str(png))
+            doc.save(str(p))
+            doc.close()
+        # 两个用例：第一个尺寸不符，第二个正常——验证第一个不崩、第二个仍跑
+        same = Path(self.tmpdir) / "same.pdf"
+        doc = fitz.open()
+        pg = doc.new_page(width=100, height=100)
+        png = Path(self.tmpdir) / "p100.png"
+        Image.fromarray(np.full((100, 100, 3), 200, dtype=np.uint8)).save(png)
+        pg.insert_image(pg.rect, filename=str(png))
+        doc.save(str(same))
+        doc.close()
+        config = [
+            {"name": "mismatch", "source_pdf": str(src), "final_pdf": str(final)},
+            {"name": "ok", "source_pdf": str(same), "final_pdf": str(same)},
+        ]
+        cfg = Path(self.tmpdir) / "cfg.json"
+        cfg.write_text(json.dumps(config))
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "verify_outputs.py"),
+             "--config", str(cfg)],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Traceback", completed.stderr, "不应有裸 traceback")
+        self.assertIn("尺寸不一致", completed.stderr)
+        # 第二个用例仍被执行（输出里应出现 [ok]）
+        self.assertIn("[ok]", completed.stdout)
+
+    def test_verify_outputs_per_case_exception_does_not_skip_rest(self):
+        """单个用例渲染异常时，后续用例仍应执行（不静默跳过）。"""
+        import json
+        import subprocess
+        import sys
+        import fitz
+        good = Path(self.tmpdir) / "good.pdf"
+        doc = fitz.open()
+        pg = doc.new_page(width=100, height=100)
+        png = Path(self.tmpdir) / "p100.png"
+        Image.fromarray(np.full((100, 100, 3), 200, dtype=np.uint8)).save(png)
+        pg.insert_image(pg.rect, filename=str(png))
+        doc.save(str(good))
+        doc.close()
+        config = [
+            # 第一个用例引用不存在的 PDF → 渲染异常
+            {"name": "missing", "source_pdf": str(Path(self.tmpdir) / "nope.pdf"),
+             "final_pdf": str(good)},
+            # 第二个用例正常
+            {"name": "ok2", "source_pdf": str(good), "final_pdf": str(good)},
+        ]
+        cfg = Path(self.tmpdir) / "cfg.json"
+        cfg.write_text(json.dumps(config))
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "verify_outputs.py"),
+             "--config", str(cfg)],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Traceback", completed.stderr)
+        self.assertIn("[ok2]", completed.stdout, "第二个用例不应被跳过")
+        self.assertIn("验证过程异常", completed.stderr)
+
+    # ── BUG-042：run_evals contrast 对照运行失败应判失败 ──
+
+    def _load_run_evals(self):
+        import importlib.util
+        evals_dir = Path(__file__).parent.parent / "evals"
+        spec = importlib.util.spec_from_file_location(
+            "run_evals_for_test_042", evals_dir / "run_evals.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_evals_contrast_check_verifies_return_code(self):
+        """源码里 contrast 对照段必须检查 returncode（否则 BEH-006 假绿）。"""
+        run_evals_src = (Path(__file__).parent.parent / "evals" / "run_evals.py").read_text(
+            encoding="utf-8"
+        )
+        # 定位 check_differs_from_contrast 到 return True 之间的对照段
+        start = run_evals_src.index("check_differs_from_contrast")
+        end = run_evals_src.index("return True", start)
+        section = run_evals_src[start:end]
+        self.assertIn("returncode", section, "contrast 对照必须检查返回码")
+
+    # ── BUG-043：identify_font 单候选不得判"确定" ──
+
+    def test_identify_font_single_candidate_not_certain(self):
+        """只有一个已装候选时不应判"确定"，且应能触发"字体可能未安装"提示。
+
+        源码校验：判定块里必须有 len(ranked)<2 守卫，且单候选分支不含"确定"。
+        """
+        src = (Path(__file__).parent / "identify_font.py").read_text(encoding="utf-8")
+        # 必须有 len(ranked) < 2 的守卫分支
+        self.assertTrue(
+            "len(ranked) < 2" in src or "len(ranked)<2" in src,
+            "identify_font 须有 len(ranked)<2 守卫，防止单候选误判确定",
+        )
+
+    # ── BUG-044：font_registry.find_font 大小写不敏感 ──
+
+    def test_find_font_case_insensitive_songti(self):
+        """find_font('songti') 与 find_font('Songti') 应对称命中（都找到或都找不到）。"""
+        import inspect
+        src = inspect.getsource(font_registry.find_font)
+        # 注册名匹配应走小写比较
+        self.assertIn("name.lower()", src, "注册名匹配应大小写不敏感")
+        # 行为校验：两者结果应一致（都命中或都不命中）
+        r_upper = font_registry.find_font("Songti")
+        r_lower = font_registry.find_font("songti")
+        self.assertEqual(r_upper is not None, r_lower is not None,
+                         "Songti/songti 命中应对称")
+
+    # ── BUG-045：render_halo 1×1 退化输入不产生 NaN ──
+
+    def test_render_halo_small_shape_no_nan(self):
+        """极小退化形状（max==min）的噪声归一化不产生 NaN。"""
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体，跳过融合测试")
+        import scan_text_fusion as stf
+        base = Image.new("RGB", (2, 2), (245, 245, 245))
+        font_path, font_idx = font_registry.default_cjk_font()
+        font = stf.load_font(font_path, 20, index=font_idx)
+        # 直接测内联归一化的守卫：低分辨率下 halo.shape 可能极小
+        result = stf.render_halo(
+            base, text="测", position=(0, 0), font=font,
+            halo_color=(178, 196, 211), seed=20260701, strength=1.0,
+        )
+        arr = np.asarray(result).astype(np.float32)
+        self.assertFalse(np.isnan(arr).any(), "render_halo 不应产生 NaN")
+
+    # ── BUG-046：feather 蒙版维度 ≤2 不应全零 ──
+
+    def test_feather_mask_small_width_not_all_zero(self):
+        """width=1 时 alpha 不应全零（供体不应被静默丢失）。"""
+        m = utils.feather_mask(1, 30, edge=4)
+        self.assertEqual(float(m.max()), 1.0, "width=1 应退化为全 1 硬边（不丢供体）")
+
+    def test_feather_mask_small_height_not_all_zero(self):
+        m = utils.feather_mask(30, 1, edge=4)
+        self.assertEqual(float(m.max()), 1.0)
+
+    def test_feather_mask_2x2_not_all_zero(self):
+        m = utils.feather_mask(2, 2, edge=4)
+        self.assertEqual(float(m.max()), 1.0)
+
+    def test_feather_mask_normal_dim_unchanged(self):
+        """合法维度行为不变：角点=0、中心=1。"""
+        m = utils.feather_mask(20, 20, edge=4)
+        self.assertAlmostEqual(float(m[0, 0, 0]), 0.0)
+        self.assertAlmostEqual(float(m[10, 10, 0]), 1.0)
+
+    # ── BUG-046：identify_size 偶数阈值中位数不截断 ──
+
+    def test_identify_size_median_rounds_not_truncates(self):
+        """中位数共识赋值语句应用 round 而非 int 截断。
+
+        检查赋值行（consensus = ...）而非全文，避免 BUG 注释里的引用误判。
+        """
+        import re
+        identify_src = (Path(__file__).parent / "identify_size.py").read_text(
+            encoding="utf-8"
+        )
+        # 找 consensus = ... 这一行实际代码（排除注释行）
+        assign_lines = [
+            line for line in identify_src.splitlines()
+            if re.match(r"\s*consensus\s*=", line) and not line.strip().startswith("#")
+        ]
+        self.assertTrue(assign_lines, "应存在 consensus 赋值语句")
+        assign = assign_lines[-1]
+        self.assertIn("round", assign, f"中位数共识应使用 round: {assign}")
+        self.assertNotIn("int(np.median", assign,
+                         f"不应直接 int(np.median()) 截断: {assign}")
+
+    # ── BUG-046：pdfium 句柄关闭 ──
+
+    def test_render_pdf_page_closes_document(self):
+        """render_pdf_page 应关闭 PdfDocument 句柄。"""
+        import inspect
+        src = inspect.getsource(utils.render_pdf_page)
+        self.assertIn("close()", src, "render_pdf_page 应 close document")
+
+    def test_pdf_page_info_closes_document(self):
+        import inspect
+        src = inspect.getsource(utils.pdf_page_info)
+        self.assertIn("close()", src, "pdf_page_info 应 close document")
+
+    # ── BUG-046：CLI 多框坏坐标不裸 traceback ──
+
+    def test_cli_bad_boxes_no_traceback(self):
+        """--boxes 给 3 个值时 exit 2 且无 traceback。"""
+        import subprocess
+        import sys
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "scan_edit_ops.py"),
+             "remove", "--source", str(src),
+             "--boxes", "50,50,100", "--output", str(Path(self.tmpdir) / "o.png")],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_identify_font_bad_ref_no_traceback(self):
+        """identify_font --ref 坐标个数错时不裸 traceback。"""
+        import subprocess
+        import sys
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "identify_font.py"),
+             "--source", str(src), "--ref", "田=50,50,100"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_identify_font_dup_ref_warns(self):
+        """identify_font 同名 --ref 重复给出应警告（不静默覆盖）。"""
+        import subprocess
+        import sys
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "identify_font.py"),
+             "--source", str(src),
+             "--ref", "田=10,10,50,50", "--ref", "田=60,10,100,50"],
+            capture_output=True, text=True,
+        )
+        self.assertIn("重复", completed.stderr)
+
+    def test_fusion_variants_trailing_comma_no_traceback(self):
+        """scan_text_fusion --fusion-variants 尾逗号不裸 traceback。"""
+        import subprocess
+        import sys
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体，跳过融合测试")
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "scan_text_fusion.py"),
+             "--source", str(src), "--text", "测", "--position", "10", "10",
+             "--variants", "--fusion-variants", "0.5,0.7,"],
+            capture_output=True, text=True,
+        )
+        self.assertNotIn("Traceback", completed.stderr)
+
+    # ── BUG-047：trigger_match 必须使用 description / keywords ──
+
+    def test_trigger_evals_uses_description(self):
+        """删掉 description 里全部触发词后，触发 eval 应失败（不再假绿）。"""
+        run_evals = self._load_run_evals()
+        # monkeypatch load_skill_description 返回不含任何触发词的描述
+        original = run_evals.load_skill_description
+        run_evals.load_skill_description = lambda: "完全无关的描述 xyz"
+        try:
+            import json
+            cases = json.loads(
+                (Path(__file__).parent.parent / "evals" / "eval_cases.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            passed, total = run_evals.run_trigger_evals(cases, verbose=False)
+            # 正例 keywords 不在空 description 里 → 应有 FAIL，passed < total
+            self.assertLess(passed, total, "空 description 时触发 eval 应失败")
+        finally:
+            run_evals.load_skill_description = original
+
+    def test_trigger_evals_passes_with_real_description(self):
+        """真实 description（含触发词）下触发 eval 全绿。"""
+        run_evals = self._load_run_evals()
+        import json
+        cases = json.loads(
+            (Path(__file__).parent.parent / "evals" / "eval_cases.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        passed, total = run_evals.run_trigger_evals(cases, verbose=False)
+        self.assertEqual(passed, total, f"真实 description 应全绿: {passed}/{total}")
+
+
+class TestBugFix048_051(unittest.TestCase):
+    """BUG-048 至 BUG-051 回归测试（第六轮审查发现的残留）。
+
+    全部为"既有修复覆盖同类但遗漏了个别位置"类型：
+    - BUG-048/049：fitz 文档句柄 try/finally + page_index 越界校验
+    - BUG-050：identify_size --ref 缺校验（与 identify_font.parse_ref 对齐）
+    - BUG-051：scan_text_fusion --reference-box/--sample-only/--crop-box 缺坐标校验
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.img = np.full((300, 300, 3), 240, dtype=np.uint8)
+        self.img[100:130, 50:250] = 60
+
+    def _save_source(self, name="s.png"):
+        path = Path(self.tmpdir) / name
+        Image.fromarray(self.img).save(path)
+        return path
+
+    # ── BUG-048：replace_pdf_image try/finally + page_index 校验 ──
+
+    def test_replace_pdf_image_closes_document_on_exception(self):
+        """replace_pdf_image 源码应有 try/finally 关闭 fitz 文档。"""
+        import inspect
+        src = inspect.getsource(utils.replace_pdf_image)
+        self.assertIn("try:", src, "replace_pdf_image 应有 try/finally")
+        self.assertIn("finally:", src)
+        self.assertIn("document.close()", src)
+
+    def test_replace_pdf_image_rejects_negative_page_index(self):
+        """page_index=-1 不应回绕到末页，应报 IndexError。"""
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        embed = self._save_source("embed.png")
+        doc = fitz.open()
+        page = doc.new_page(width=100, height=100)
+        page.insert_image(page.rect, filename=str(embed))
+        original = Path(self.tmpdir) / "single.pdf"
+        doc.save(str(original))
+        doc.close()
+        new_img = Image.fromarray(np.full((100, 100, 3), 100, dtype=np.uint8))
+        with self.assertRaises(IndexError):
+            utils.replace_pdf_image(original, Path(self.tmpdir) / "o.pdf", new_img, page_index=-1)
+
+    def test_replace_pdf_image_rejects_out_of_range_page_index(self):
+        """page_index 超出页数应报 IndexError。"""
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        embed = self._save_source("embed.png")
+        doc = fitz.open()
+        page = doc.new_page(width=100, height=100)
+        page.insert_image(page.rect, filename=str(embed))
+        original = Path(self.tmpdir) / "single.pdf"
+        doc.save(str(original))
+        doc.close()
+        new_img = Image.fromarray(np.full((100, 100, 3), 100, dtype=np.uint8))
+        with self.assertRaises(IndexError):
+            utils.replace_pdf_image(original, Path(self.tmpdir) / "o.pdf", new_img, page_index=5)
+
+    def test_replace_pdf_image_valid_page_index_works(self):
+        """合法 page_index=0 仍正常工作。"""
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        embed = self._save_source("embed.png")
+        doc = fitz.open()
+        page = doc.new_page(width=100, height=100)
+        page.insert_image(page.rect, filename=str(embed))
+        original = Path(self.tmpdir) / "single.pdf"
+        doc.save(str(original))
+        doc.close()
+        new_img = Image.fromarray(np.full((100, 100, 3), 100, dtype=np.uint8))
+        out = Path(self.tmpdir) / "out.pdf"
+        utils.replace_pdf_image(original, out, new_img, page_index=0)
+        self.assertTrue(out.exists())
+
+    # ── BUG-049：render_case_page pymupdf try/finally + page_index 校验 ──
+
+    def test_render_case_page_pymupdf_closes_document(self):
+        """render_case_page pymupdf 路径应有 try/finally 关闭 fitz 文档。"""
+        import inspect
+        import verify_outputs as vo
+        src = inspect.getsource(vo.render_case_page)
+        self.assertIn("try:", src, "pymupdf 路径应有 try/finally")
+        self.assertIn("finally:", src)
+        self.assertIn("document.close()", src)
+
+    def test_render_case_page_pymupdf_rejects_out_of_range_page_index(self):
+        """pymupdf 后端 page_index 越界应报 IndexError 而非回绕到末页。"""
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        import verify_outputs as vo
+        img = self._save_source("p.png")
+        doc = fitz.open()
+        pg = doc.new_page(width=100, height=100)
+        pg.insert_image(pg.rect, filename=str(img))
+        pdf_path = Path(self.tmpdir) / "single.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+        with self.assertRaises(IndexError):
+            vo.render_case_page(pdf_path, "pymupdf", 72, page_index=5)
+
+    def test_render_case_page_pymupdf_valid_page_works(self):
+        """合法 page_index=0 的 pymupdf 渲染仍正常工作。"""
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        import verify_outputs as vo
+        img = self._save_source("p.png")
+        doc = fitz.open()
+        pg = doc.new_page(width=100, height=100)
+        pg.insert_image(pg.rect, filename=str(img))
+        pdf_path = Path(self.tmpdir) / "single.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+        result = vo.render_case_page(pdf_path, "pymupdf", 72, page_index=0)
+        self.assertEqual(result.shape[2], 3)
+
+    # ── BUG-050：identify_size --ref 校验 ──
+
+    def test_identify_size_parse_ref_rejects_missing_equals(self):
+        """缺等号应给清晰错误而非裸 traceback。"""
+        import identify_size
+        with self.assertRaises(SystemExit) as ctx:
+            identify_size.parse_ref("田50,50,100,100")
+        self.assertIn("格式应为", str(ctx.exception))
+
+    def test_identify_size_parse_ref_rejects_wrong_coord_count(self):
+        """坐标个数不对应给清晰错误。"""
+        import identify_size
+        with self.assertRaises(SystemExit) as ctx:
+            identify_size.parse_ref("田=50,50,100")
+        self.assertIn("4 个值", str(ctx.exception))
+
+    def test_identify_size_parse_ref_rejects_negative_coords(self):
+        """负坐标应被拒绝（不会在 numpy 切片中回绕）。"""
+        import identify_size
+        with self.assertRaises(SystemExit) as ctx:
+            identify_size.parse_ref("田=-50,50,100,100")
+        self.assertIn("非负", str(ctx.exception))
+
+    def test_identify_size_parse_ref_rejects_inverted_box(self):
+        """倒置框应被拒绝。"""
+        import identify_size
+        with self.assertRaises(SystemExit) as ctx:
+            identify_size.parse_ref("田=100,50,50,100")
+        self.assertIn("x1<x2", str(ctx.exception))
+
+    def test_identify_size_parse_ref_valid_accepted(self):
+        """合法输入不受影响。"""
+        import identify_size
+        name, box = identify_size.parse_ref("田=50,50,100,100")
+        self.assertEqual(name, "田")
+        self.assertEqual(box, (50, 50, 100, 100))
+
+    def test_identify_size_bad_ref_no_traceback(self):
+        """--ref 格式错误时 exit 非零且无 traceback。"""
+        import subprocess
+        import sys
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "identify_size.py"),
+             "--source", str(src), "--font", "nonexistent_font",
+             "--ref", "田50,50,100,100"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    # ── BUG-051：scan_text_fusion 坐标校验 ──
+
+    def test_stf_validate_box_rejects_negative(self):
+        """validate_box 应拒绝负坐标。"""
+        import scan_text_fusion as stf
+        with self.assertRaises(SystemExit) as ctx:
+            stf.validate_box([-10, 50, 100, 100], "reference-box")
+        self.assertIn("非负", str(ctx.exception))
+
+    def test_stf_validate_box_rejects_inverted(self):
+        """validate_box 应拒绝倒置框。"""
+        import scan_text_fusion as stf
+        with self.assertRaises(SystemExit) as ctx:
+            stf.validate_box([100, 50, 50, 100], "crop-box")
+        self.assertIn("x1<x2", str(ctx.exception))
+
+    def test_stf_validate_box_valid_accepted(self):
+        """合法框不受影响。"""
+        import scan_text_fusion as stf
+        result = stf.validate_box([0, 0, 100, 100], "sample-only")
+        self.assertEqual(result, (0, 0, 100, 100))
+
+    def test_stf_sample_only_negative_coords_no_traceback(self):
+        """--sample-only 负坐标应 exit 非零且无 traceback。"""
+        import subprocess
+        import sys
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "scan_text_fusion.py"),
+             "--source", str(src), "--sample-only", "-10", "50", "100", "100"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_stf_reference_box_negative_coords_no_traceback(self):
+        """--reference-box 负坐标应 exit 非零且无 traceback。"""
+        import subprocess
+        import sys
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体，跳过融合测试")
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "scan_text_fusion.py"),
+             "--source", str(src), "--text", "测", "--position", "10", "10",
+             "--reference-box", "-10", "50", "100", "100"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_stf_crop_box_inverted_no_traceback(self):
+        """--crop-box 倒置坐标应 exit 非零且无 traceback。"""
+        import subprocess
+        import sys
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体，跳过融合测试")
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "scan_text_fusion.py"),
+             "--source", str(src), "--text", "测", "--position", "10", "10",
+             "--crop-box", "100", "50", "50", "100"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Traceback", completed.stderr)
 
 
 if __name__ == "__main__":

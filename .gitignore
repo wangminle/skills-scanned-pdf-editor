@@ -209,3 +209,12 @@ Desktop.ini
 
 # Python tooling metadata not covered by the standard template above
 pip-wheel-metadata/
+
+# Project runtime artifacts
+# scan_text_fusion.py default --output-dir
+scan_text_fusion_out/
+# replace_pdf_image temporary file (residual on exception)
+*.tmp.pdf
+# User task working directories (process artifacts, not source)
+tmp/
+tasks/

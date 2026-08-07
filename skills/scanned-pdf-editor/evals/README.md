@@ -7,6 +7,7 @@
 检查 SKILL.md 描述与真实提示词的匹配度。验证：
 - **正例**：涉及扫描版 PDF 删除/移动/替换/增加/复合操作的提示词应触发技能
 - **负例**：与扫描 PDF 编辑无关的提示词不应触发
+- **description 覆盖**：正例用例的 `keywords` 至少有一个须出现在 SKILL.md frontmatter `description` 中（否则触发测试名存实亡）
 
 匹配规则：prompt 同时含"扫描/PDF/扫描件"类词 + "删除/移动/替换/增加/编辑/修改"类词。
 
@@ -18,7 +19,7 @@
 - **move**：输出尺寸不变、目标位置出现内容
 - **compound**：源块被清除、目标位置出现源块内容
 - **replace**：输出尺寸不变、目标区域有新内容
-- **replace --normalize-mode offset**：offset 与 contrast 模式产生不同输出
+- **replace --normalize-mode offset**：offset 与 contrast 模式产生不同输出；contrast 对照运行失败（非零退出码/无输出）计为失败，不假绿
 
 ## 3. 基线对比 (baseline)
 

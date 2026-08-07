@@ -41,8 +41,8 @@
     "prompt": "把这块内容复制到上面，然后把原来位置和其他几行都清掉",
     "should_trigger": true,
     "expected_mode": "compound",
-    "keywords": ["复制", "清掉"],
-    "note": "复合操作场景：复制后清除"
+    "keywords": ["复制", "清掉", "移动", "删除"],
+    "note": "复合操作场景：复制后清除（本质是移动+删除，keywords 取 description 已覆盖的移动/删除以校验触发可发现性）"
   },
   {
     "id": "TRG-006",

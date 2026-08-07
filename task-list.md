@@ -47,6 +47,22 @@
 | BUG-033 | 修复 | move_block / move_and_clear：倒置或零高 source_y（y1≥y2）仍通过 BUG-020 越界守卫；空移动后自动 cleanup 仍静默改图（探针：source_y=(60,40)/(40,40) 改 522px） | 2026-08-06 12:35 | 2026-08-06 12:44 | 已修复 | 库函数校验 x1&lt;x2、y1&lt;y2；CLI 新增 parse_ordered_pair 用于 --content-x/--source-y；见 [[TST-014]] [[CHK-021]] |
 | BUG-034 | 修复 | run_evals check_differs_from_contrast：仅检查 `--normalize-mode` 键存在，主跑已是 contrast 时仍做 contrast↔contrast，失败文案误报「offset 与 contrast 输出相同」 | 2026-08-06 12:35 | 2026-08-06 12:44 | 已修复 | 校验取值 ≠ contrast，否则返回合约失败原因；见 [[TST-014]] |
 | BUG-035 | 修复 | cmd_package 无 --page-size 时用 `--dpi 0` 推算 page_size → ZeroDivisionError 裸崩（BUG-024/030 未覆盖 dpi 回退路径） | 2026-08-06 12:35 | 2026-08-06 12:44 | 已修复 | dpi≤0 时 stderr 清晰错误并 exit 2；见 [[TST-014]] |
+| BUG-036 | 修复 | _select_page_image_xref 不去重 xref：同一图片在页面放置两次时 get_images 返回重复条目，strict 模式误报「覆盖比例最高的两个过近」，replace --original-pdf 不可用 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | 按 xref 去重后再评分；重复 xref [5,5] 去重后正常返回 5；见 [[TST-015]] [[CHK-023]] |
+| BUG-037 | 修复 | parse_box 不拒绝负坐标，numpy 负索引静默回绕：remove/move/verify/sample_ink_color/identify 参考框等切片路径把操作移到错误区域且全程无报错 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | parse_box 加非负校验；identify_font.parse_ref 同步加非负+有序校验；见 [[TST-015]] [[CHK-023]] |
+| BUG-038 | 修复 | move_block / move_and_clear 只校验 y 方向越界（BUG-020），x2 超宽被静默截小、x1<0 回绕为空块，cleanup 仍执行并报告成功 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | move_block/move_and_clear 补对称 x 方向校验（x1<0 或 x2>img_w 报错）；见 [[TST-015]] [[CHK-023]] |
+| BUG-039 | 修复 | cmd_verify 的 --blank-box/--preserve-box 完全越界时切片为空，blank/preserved 计数为 0，验证对未检查任何像素的框报告「验证通过」 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | cmd_verify 裁剪框到图像边界后判交集为空即 exit 1；blank_region_dark_pixels 空框报错；见 [[TST-015]] [[CHK-023]] |
+| BUG-040 | 修复 | replace 的 donor_box/reference_box 越界不校验：部分越界时供体被静默截小贴不满目标区；完全越界时抛误导性「未找到暗色墨迹」 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | replace_with_donor 入口校验 donor_box⊂供体图、reference_box⊂底图，越界 ValueError；见 [[TST-015]] [[CHK-023]] |
+| BUG-041 | 修复 | verify_outputs.py 源/终版页尺寸不一致时 image_diff 抛 ValueError 裸 traceback：错误不归档到用例、后续全部用例被跳过、已记录的错误也不输出 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | verify 渲染后先比 shape 短路报错；main 逐用例 try/except 归档异常不崩；见 [[TST-015]] [[CHK-023]] |
+| BUG-042 | 修复 | run_evals.py check_differs_from_contrast 不检查对照运行返回码：contrast 运行失败时整个 diff 块被跳过，BEH-006 假绿 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | contrast 对照运行检查 returncode≠0 与输出缺失，失败显式判失败；见 [[TST-015]] [[CHK-023]] |
+| BUG-043 | 修复 | identify_font.py 只有一个已装候选字体时 second_score=0，margin=总分必然达标，均分≥0.6 即误判「确定（明显领先）」，且抑制「目标字体可能未安装」提示 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | len(ranked)<2 时判「参考（仅一个已装候选）」，不抑制安装提示；见 [[TST-015]] [[CHK-023]] |
+| BUG-044 | 修复 | font_registry.find_font 注册名模糊匹配大小写敏感：find_font("Songti") 命中而 find_font("songti") 返回 None，与文件名匹配的 lower() 行为不一致 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | 改为 spec_l in name.lower()，注册名/文件名匹配均大小写不敏感；见 [[TST-015]] [[CHK-023]] |
+| BUG-045 | 修复 | render_halo 内联的噪声归一化未同步 BUG-031 守卫：1×1 退化输入 max==min 除零产生 NaN，经 uint8 转换静默归零 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | render_halo 内联归一化加 span==0 守卫返回零场；见 [[TST-015]] [[CHK-023]] |
+| BUG-046 | 修复 | 次要缺陷打包：feather_mask 宽/高≤2 时 alpha 全零供体静默丢失；多处 CLI 解析裸 traceback（--boxes 未挂 type=、--fusion-variants/--candidates 尾逗号、--ref 坐标个数错）；identify_size 偶数阈值中位数 int() 截断；identify_font 重复 --ref 同字静默覆盖；render_pdf_page/pdf_page_info 的 pypdfium2 句柄未关闭 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | feather 维度≤2 返回全 1；CLI main 集中捕获 ArgumentTypeError/ValueError exit 2；parse_ref 显式校验；fusion-variants 过滤空段；中位数改 round；重复 ref 警告；pdfium 句柄 try/finally close；见 [[TST-015]] [[CHK-023]] |
+| BUG-047 | 修复 | run_evals.py trigger_match 从不使用加载的 SKILL.md description 与用例 keywords 字段：删掉 description 里全部触发词，8 项触发 eval 仍全绿，触发测试名存实亡 | 2026-08-07 10:10 | 2026-08-07 11:20 | 已修复 | run_trigger_evals 增 keyword 覆盖校验：正例 keywords 须至少一个出现在 description 中，否则 FAIL；TRG-005 keywords 补移动/删除；见 [[TST-015]] [[CHK-023]] |
+| BUG-048 | 修复 | replace_pdf_image 的 fitz 文档句柄不在 try/finally 中，异常时泄漏文件描述符（与 BUG-046 的 render_pdf_page/pdf_page_info 同族但遗漏了此处）；且 page_index 无越界校验，fitz 负索引回绕到末页，静默替换错误页面 | 2026-08-07 12:30 | 2026-08-07 12:45 | 已修复 | 加 try/finally 关闭 document；page_index 越界 IndexError；见 [[TST-016]] [[CHK-025]] |
+| BUG-049 | 修复 | verify_outputs.py render_case_page 的 pymupdf 后端同样缺 try/finally 和 page_index 校验（与 BUG-048 同族），pdfium 路径已在 BUG-046 修复但 pymupdf 路径被遗漏 | 2026-08-07 12:30 | 2026-08-07 12:45 | 已修复 | pymupdf 路径加 try/finally 关闭 document；page_index 越界 IndexError；见 [[TST-016]] [[CHK-025]] |
+| BUG-050 | 修复 | identify_size.py --ref 解析用 r.split('=') / box.split(',') 无校验：缺等号、坐标个数错、负坐标回绕均产生裸 traceback 或静默错位（与 BUG-037 同族），identify_font.parse_ref 已有完整校验但此处未对齐 | 2026-08-07 12:30 | 2026-08-07 12:45 | 已修复 | 新增 parse_ref 函数与 identify_font.parse_ref 对齐（格式/个数/整数/非负/有序校验）；见 [[TST-016]] [[CHK-025]] |
+| BUG-051 | 修复 | scan_text_fusion.py --reference-box / --sample-only / --crop-box 用 type=int nargs=4 直接接收，负坐标在 numpy 切片 / PIL crop 中静默回绕或截断到错误区域（与 BUG-037 同族） | 2026-08-07 12:30 | 2026-08-07 12:45 | 已修复 | 新增 validate_box 校验非负+x1<x2+y1<y2，三处调用点均接入；见 [[TST-016]] [[CHK-025]] |
 
 ## 调整事项
 
@@ -84,6 +100,11 @@
 | CHK-019 | 检查 | BUG-020..032 全量修复回归验证：95 单测 + ruff 全清 + run_checks.sh + evals 17/17 + 合法路径 bit-exact（旧版 vs 新版逐函数对比） | 2026-08-06 11:46 | 2026-08-06 12:23 | 已完成 | 95 passed（80 原+15 新 TestBugFix028_032）；ruff check . 全清；run_checks.sh ✅；evals 17/17；feather/smooth_noise/save_pdf/telea/interpolate/move/replace/fusion/halo 全 bit-exact；见 [[BUG-020]]..[[BUG-032]] [[TST-012]] [[TST-013]] |
 | CHK-020 | 检查 | 独立复核 BUG-020..032 修复充分性：复跑门禁 + 边界探针 + correctness/testing 审查 | 2026-08-06 12:31 | 2026-08-06 12:40 | 已完成 | 鲜证据：95 passed、run_checks ✅、evals 17/17；宣称失败模式大多已堵住；残留 [[BUG-033]](P1) [[BUG-034]](P2) [[BUG-035]](P2)；测试缺口见备注（BUG-027 仅字符串锁、BUG-028 assertRaises 过宽、下溢/target_contrast/CLI page-size≤0 等未锁） |
 | CHK-021 | 检查 | BUG-033..035 修复回归：106 单测 + ruff + run_checks + evals 17/17；顺带收紧 BUG-027/028 测试并文档化单图空 rect | 2026-08-06 12:41 | 2026-08-06 12:44 | 已完成 | 106 passed；见 [[BUG-033]]..[[BUG-035]] [[TST-014]] |
+| CHK-022 | 检查 | 全项目 bug 复查（第五轮）：106 单测基线全过后，5 路并行逐文件审查 + 重点发现亲自复现，登记 [[BUG-036]]～[[BUG-047]] | 2026-08-07 10:10 | 2026-08-07 10:10 | 已完成 | 最重 [[BUG-036]] xref 重复 strict 误报、[[BUG-037]] 负坐标静默回绕（均已复现）；代码未修，待用户决定 |
+| CHK-023 | 检查 | BUG-036～047 全量修复回归验证：140 单测 + ruff 全清 + run_checks.sh + evals 17/17 + 逐 bug 行为复验 | 2026-08-07 11:00 | 2026-08-07 11:20 | 已完成 | 140 passed（106 原 + 34 新 TestBugFix036_047）；ruff check . 全清；run_checks.sh ✅；evals 17/17；12 组 bug 逐项行为复验均 FIXED；见 [[BUG-036]]..[[BUG-047]] [[TST-015]] |
+| CHK-024 | 检查 | 独立复核 BUG-036～047 是否均已修复：源码逐项对照 + TestBugFix036_047 + 全量单测 | 2026-08-07 11:00 | 2026-08-07 11:00 | 已完成 | 12 项源码修复均在位；TestBugFix036_047 34/34 passed；全量 140 passed；与 [[CHK-023]]/[[TST-015]] 结论一致，待修复=0 |
+| CHK-025 | 检查 | 第六轮全项目 bug 复查：140 单测基线全过后逐文件审查，发现 [[BUG-048]]～[[BUG-051]]（fitz 句柄泄漏/越界、coordinate 校验遗漏），修复后全量回归 | 2026-08-07 12:30 | 2026-08-07 12:45 | 已完成 | 159 passed（140 原 + 19 新 TestBugFix048_051）；ruff check . 全清；run_checks.sh ✅；evals 17/17；见 [[BUG-048]]..[[BUG-051]] [[TST-016]] |
+| CHK-026 | 检查 | 独立复核 BUG-048～051 是否均已修复：源码逐项对照 + TestBugFix048_051 | 2026-08-07 11:24 | 2026-08-07 11:24 | 已完成 | 4 项源码修复均在位；TestBugFix048_051 19/19 passed；与 [[CHK-025]]/[[TST-016]] 结论一致 |
 
 ## 测试数据
 
@@ -103,6 +124,8 @@
 | TST-012 | 开发 | TestBugFix020_027 新增 22 项回归测试：BUG-020 越界移动(3)+BUG-021 零对比度(5)+BUG-022 插值越界(3)+BUG-023 贴入越界(2)+BUG-024 page-size(3)+BUG-025 空ROI/子目录(2)+BUG-026 evals合约(2)+BUG-027 ruff范围(2) | 2026-08-06 11:30 | 2026-08-06 12:23 | 已完成 | 80 passed（含此前 58 原+22 新）；ruff 全清；evals 17/17；见 [[BUG-020]]..[[BUG-027]] |
 | TST-013 | 开发 | TestBugFix028_032 新增 15 项回归测试：BUG-028 倒置框(4)+BUG-029 feather除零(3)+BUG-030 page_size校验(4)+BUG-031 smooth_noise退化(2)+BUG-032 空rect(2) | 2026-08-06 11:46 | 2026-08-06 12:23 | 已完成 | 95 passed（80 原+15 新）；ruff 全清；run_checks.sh 通过；evals 17/17；见 [[BUG-028]]..[[BUG-032]] |
 | TST-014 | 开发 | TestBugFix033_035 + 测试收紧：倒置/零高 move(4)+parse_ordered_pair(2)+destination 点坐标(1)+evals contrast 合约(1)+dpi≤0(2)+单图空 rect 文档化(1)；BUG-027 非注释命令锁；BUG-028 ArgumentTypeError | 2026-08-06 12:41 | 2026-08-06 12:44 | 已完成 | 106 passed（95 原+约 11 新/收紧）；见 [[BUG-033]]..[[BUG-035]] [[CHK-021]] |
+| TST-015 | 开发 | TestBugFix036_047 新增 34 项回归测试：BUG-036 xref去重(1)+BUG-037 负坐标(3)+BUG-038 x越界(4)+BUG-039 越界verify(4)+BUG-040 donor/ref越界(3)+BUG-041 尺寸/异常(2)+BUG-042 源码锁(1)+BUG-043 单候选(1)+BUG-044 大小写(1)+BUG-045 halo退化(1)+BUG-046 feather/median/pdfium/CLI(11)+BUG-047 trigger description(2)；并修正 BUG-013 歧义测试改用不同图 | 2026-08-07 11:00 | 2026-08-07 11:20 | 已完成 | 140 passed（106 原+34 新）；ruff 全清；run_checks.sh ✅；evals 17/17；见 [[BUG-036]]..[[BUG-047]] [[CHK-023]] |
+| TST-016 | 开发 | TestBugFix048_051 新增 19 项回归测试：BUG-048 replace_pdf_image try/finally源码锁+负页码+越界页码+合法页码(4)+BUG-049 pymupdf try/finally源码锁+越界页码+合法页码(3)+BUG-050 parse_ref缺等号/坐标个数/负坐标/倒置框/合法值/CLI无traceback(6)+BUG-051 validate_box负坐标/倒置框/合法值/sample-only CLI/reference-box CLI/crop-box CLI(6) | 2026-08-07 12:30 | 2026-08-07 12:45 | 已完成 | 159 passed（140 原+19 新）；ruff 全清；run_checks.sh ✅；evals 17/17；见 [[BUG-048]]..[[BUG-051]] [[CHK-025]] |
 
 ## 文档维护
 
@@ -118,6 +141,8 @@
 | DOC-008 | 文档 | SKILL.md font_registry 节补 macOS ~/Library/Fonts 目录说明 + 字体缺失安装指引 blockquote；identify_font.py docstring 同步置信度不足提示 | 2026-08-05 20:15 | 2026-08-05 20:25 | 已完成 | macOS 仿宋行改为"需自行安装（放入 ~/Library/Fonts）"；新增字体缺失提示说明 |
 | DOC-009 | 文档 | SKILL.md 参数表补全：remove 表加 --noise-sigma/--seed 行；move 表加 --cleanup-boxes 行并更新 --shift-y 描述 | 2026-08-06 11:30 | 2026-08-06 12:23 | 已完成 | 对应 [[BUG-020]]..[[BUG-027]] 修复涉及的参数文档化 |
 | DOC-010 | 文档 | 版本升至 V0.1.1：新增 VERSION/CHANGELOG；同步根 README、skill README、SKILL.md（坐标有序、page-size/dpi/feather、package 参数表）、evals/README；CLI help 对齐 | 2026-08-06 12:45 | 2026-08-06 12:48 | 已完成 | 全称 V0.1.1-Build0178-20260806；SKILL.md 468 行仍 &lt;500；106 passed / run_checks ✅ |
+| DOC-011 | 文档 | 版本升至 V0.1.2：VERSION/CHANGELOG 记录 BUG-036～051；同步根 README、skill README、SKILL.md、evals/README、pipeline_methodology（非负坐标、move x、donor 框、feather≤2、单候选字体、page-index、trigger keywords 等） | 2026-08-07 11:17 | 2026-08-07 11:22 | 已完成 | 全称曾用 V0.1.2-Build0179-20260807；后由 [[DOC-012]] 将 VERSION 收为仅 V0.1.2；SKILL.md 471 行 &lt;500；159 passed |
+| DOC-012 | 文档 | VERSION 约定改为只记版本号（`V0.1.2`），不再含 Build/日期；同步 CHANGELOG 格式说明与根 README 结构注释 | 2026-08-07 11:30 | 2026-08-07 11:30 | 已完成 | Build/日期仅保留在 CHANGELOG 发布条目标题 |
 
 ## 功能开发
 
@@ -138,6 +163,7 @@
 | OPS-002 | 运维 | 安装 CLAUDE.md 会话结束任务同步规则与 Stop hook，提醒后续 agent 自动维护 task-list | 2026-08-06 11:07 | 2026-08-06 11:07 | 已完成 | 中文规则写入 CLAUDE.md；hook 注册于 .claude/settings.json，脚本为 .claude/hooks/tasklist_sync_reminder.sh；已验证 JSON、可执行权限及单会话去重 |
 | OPS-003 | 运维 | .gitignore 增补 Agent 安装目录忽略：.agents/、.claude/、.zcode/ | 2026-08-06 11:09 | 2026-08-06 11:09 | 已完成 | 源码目录 skills/ 不受影响；git check-ignore 验证三条规则生效；见 [[CHK-016]] |
 | OPS-004 | 运维 | run_checks.sh ruff 漏查 evals/（与 [[BUG-027]] 同因） | 2026-08-06 11:45 | 2026-08-06 11:47 | 已关闭 | 并入 [[BUG-027]] 跟踪，避免重复；修复时改 run_checks.sh 即可 |
+| OPS-005 | 运维 | .gitignore 增补项目运行时产物：scan_text_fusion_out/（默认输出目录）、*.tmp.pdf（replace_pdf_image 异常残留）、tmp/ 与 tasks/（用户任务工作目录） | 2026-08-07 13:00 | 2026-08-07 13:00 | 已完成 | git check-ignore 验证四条规则生效；无已跟踪源文件受影响；见 [[CHK-016]] |
 
 ## 规划事项
 
@@ -165,14 +191,14 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 35 | 35 | 0 | 100% |
+| 代码 Bug | 51 | 51 | 0 | 100% |
 | 调整事项 | 6 | 6 | 0 | 100% |
-| 检查事项 | 21 | 21 | 0 | 100% |
-| 测试数据 | 14 | 14 | 0 | 100% |
-| 文档维护 | 10 | 10 | 0 | 100% |
+| 检查事项 | 26 | 26 | 0 | 100% |
+| 测试数据 | 16 | 16 | 0 | 100% |
+| 文档维护 | 12 | 12 | 0 | 100% |
 | 功能开发 | 6 | 6 | 0 | 100% |
-| 配置运维 | 4 | 4 | 0 | 100% |
+| 配置运维 | 5 | 5 | 0 | 100% |
 | 规划事项 | 2 | 2 | 0 | 100% |
 | 优化事项 | 3 | 3 | 0 | 100% |
 | 调研事项 | 2 | 2 | 0 | 100% |
-| **总计** | 103 | 103 | 0 | 100% |
+| **总计** | 127 | 127 | 0 | 100% |

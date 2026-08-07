@@ -51,6 +51,31 @@ def best_size_for_threshold(font_path, font_index, refs_scan_dims, sizes, thr):
     best = min(agg, key=agg.get)
     return best, agg
 
+def parse_ref(s):
+    """char=x1,y1,x2,y2 -> (char, (x1,y1,x2,y2))
+
+    BUG-050：旧实现 r.split('=') / box.split(',') 无校验--缺等号、坐标个数错、
+    负坐标回绕均产生裸 traceback 或静默错位。与 identify_font.parse_ref 对齐。
+    """
+    if '=' not in s:
+        raise SystemExit(f"错误: --ref 格式应为 字符=x1,y1,x2,y2，收到: {s!r}")
+    name, coords = s.split('=', 1)
+    parts = [v.strip() for v in coords.split(',')]
+    if len(parts) != 4:
+        raise SystemExit(
+            f"错误: --ref 坐标需为 4 个值 x1,y1,x2,y2，收到 {len(parts)} 个: {coords!r}"
+        )
+    try:
+        x1, y1, x2, y2 = (int(v) for v in parts)
+    except ValueError:
+        raise SystemExit(f"错误: --ref 坐标需为整数，收到: {coords!r}")
+    if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0:
+        raise SystemExit(f"错误: --ref 坐标需全部非负，收到: {coords!r}")
+    if x1 >= x2 or y1 >= y2:
+        raise SystemExit(f"错误: --ref 坐标需满足 x1<x2 且 y1<y2，收到: {coords!r}")
+    return name.strip(), (x1, y1, x2, y2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--source', required=True)
@@ -81,8 +106,8 @@ def main():
 
     refs_dims = []
     for r in args.ref:
-        ch, box = r.split('=')
-        x1, y1, x2, y2 = [int(v) for v in box.split(',')]
+        ch, box = parse_ref(r)
+        x1, y1, x2, y2 = box
         refs_dims.append((ch, arr[y1:y2, x1:x2]))
 
     print('=== 字号识别（墨迹尺寸匹配 × 多暗核阈值共识）===')
@@ -108,7 +133,9 @@ def main():
         dims_str = ' '.join(f'{ch}:h{d[0]}w{d[1]}' for ch, d in scan_dims if d)
         print(f'  thr {thr:>3} → 字号 {best:>2}  (误差 {agg[best]:.3f})   scan墨迹 {dims_str}')
 
-    consensus = int(np.median(recs))
+    # BUG-046：int(np.median(recs)) 对偶数个阈值把中位数向下截断（如 [30,31]→30）。
+    # 改用 round 到最接近的字号，避免系统性偏向更小字号。
+    consensus = int(round(float(np.median(recs))))
     # 置信度门：阈值间共识度。全阈值一致或仅 1 个偏离 = 确定；否则存疑。
     agree = sum(1 for r in recs if r == consensus)
     n = len(recs)

@@ -1,12 +1,12 @@
 ---
 name: scanned-pdf-editor
 description: 对用户有权编辑的扫描版 PDF 或扫描件图片做局部编辑（删除内容、移动位置、替换文字、补录新文字），使修改区域在字体、字号、墨色、纸纹、扫描噪点上与原扫描件像素级一致。仅用于授权且内容真实的场景，不用于伪造或篡改以误导第三方。
-version: V0.1.1
+version: V0.1.2
 ---
 
 # 扫描版 PDF 编辑修改（scanned-pdf-editor）
 
-> **版本**：V0.1.1（见仓库根目录 `VERSION` / `CHANGELOG.md`）
+> **版本**：V0.1.2（见仓库根目录 `VERSION` / `CHANGELOG.md`）
 
 对扫描版 PDF 或扫描件图片做局部编辑，使修改区域在字体、字号、墨色、纸纹、扫描噪点上
 与原扫描件保持一致。**仅用于用户有权编辑、且修改内容真实的场景**。
@@ -38,6 +38,8 @@ version: V0.1.1
 5. **小步迭代**--每轮只动一两个参数，看裁剪预览再决定。
 6. **留痕可追溯**--每个任务目录除最终图外，必须留存过程记录与关键中间产物。
 
+> **坐标约定（全局）**：所有框/区间像素坐标须**非负**且**有序**（`x1<x2`、`y1<y2`）。
+> 负值会报错，不会被 numpy/PIL 静默回绕到页尾。
 ## 四种操作模式
 
 ### 模式 A：删除内容
@@ -77,7 +79,7 @@ python3 scripts/scan_edit_ops.py remove \
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
-| `--boxes` | 删除区域列表，每个 `x1,y1,x2,y2`（须 `x1<x2` 且 `y1<y2`，倒置/空框会报错） | 必填 |
+| `--boxes` | 删除区域列表，每个 `x1,y1,x2,y2`（须非负且 `x1<x2`、`y1<y2`） | 必填 |
 | `--method` | `telea`（默认）或 `interpolate` | `telea` |
 | `--ink-threshold` | 墨迹亮度阈值（<此值为墨迹） | 180 |
 | `--dilation` | 膨胀核大小 | 5 |
@@ -109,11 +111,11 @@ python3 scripts/scan_edit_ops.py move \
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
-| `--content-x` | 移动区域横向范围 `x1,x2`（须 `x1<x2`） | 必填 |
-| `--source-y` | 移动区域纵向范围 `y1,y2`（须 `y1<y2`） | 必填 |
+| `--content-x` | 移动区域横向范围 `x1,x2`（须非负、`x1<x2`，且完整落在图宽内） | 必填 |
+| `--source-y` | 移动区域纵向范围 `y1,y2`（须非负、`y1<y2`） | 必填 |
 | `--shift-y` | 上移像素数（正值=上移；目标位置越出页面会报错，不会静默绕行） | 必填 |
 | `--cleanup-ink-threshold` | 残留清理的墨迹阈值 | 246 |
-| `--cleanup-boxes` | 手动指定残留清理区域列表 `x1,y1,x2,y2`（可多个；每框须 `x1<x2` 且 `y1<y2`） | 自动取源区域尾部 |
+| `--cleanup-boxes` | 手动指定残留清理区域列表 `x1,y1,x2,y2`（可多个；每框须非负且有序） | 自动取源区域尾部 |
 
 **注意**：移动框只包正文主栏，不得包含页框、页码、印章、批注。
 
@@ -136,10 +138,10 @@ python3 scripts/scan_edit_ops.py compound \
 | 参数 | 说明 | 默认 |
 |---|---|---|
 | `--source` | 输入图片路径 | 必填 |
-| `--content-x` | 内容横向范围 `x1,x2`（源块宽度；须 `x1<x2`） | 必填 |
-| `--source-y` | 源块纵向范围 `y1,y2`（须 `y1<y2`） | 必填 |
+| `--content-x` | 内容横向范围 `x1,x2`（源块宽度；须非负、`x1<x2`，且完整落在图宽内） | 必填 |
+| `--source-y` | 源块纵向范围 `y1,y2`（须非负、`y1<y2`） | 必填 |
 | `--shift-y` | 上移像素数（正值=上移；目标越出页面会报错） | 必填 |
-| `--clear-boxes` | 需清除的区域列表（`x1,y1,x2,y2`，可多个；每框须有序） | 必填 |
+| `--clear-boxes` | 需清除的区域列表（`x1,y1,x2,y2`，可多个；每框须非负且有序） | 必填 |
 | `--noise-sigma` | 插值填底的噪声 sigma | 0.45 |
 | `--seed` | 随机种子 | 20260805 |
 | `--output` | 输出路径 | 必填 |
@@ -174,11 +176,11 @@ python3 scripts/scan_edit_ops.py replace \
 | 参数 | 说明 | 默认 |
 |---|---|---|
 | `--donor-source` | 供体所在图片（同页则与 source 相同） | 与 source 相同 |
-| `--donor-box` | 供体词块框 `x1,y1,x2,y2` | 必填 |
+| `--donor-box` | 供体词块框 `x1,y1,x2,y2`（须完整落在供体图内） | 必填 |
 | `--remove-boxes` | 目标清理框列表 | 必填 |
-| `--destination` | 供体贴入左上角 `x,y` | 必填 |
-| `--reference-box` | 目标行参考字框（用于暗度匹配） | 必填 |
-| `--feather` | 羽化宽度（`<=0` 视为硬边全覆盖，不产生 NaN） | 4 |
+| `--destination` | 供体贴入左上角 `x,y`（贴入区须完整落在目标图内） | 必填 |
+| `--reference-box` | 目标行参考字框（用于暗度匹配；须完整落在目标图内） | 必填 |
+| `--feather` | 羽化宽度（`<=0` 或宽/高≤2 时为硬边全覆盖，不产生 NaN/全零蒙版） | 4 |
 | `--mask-mode` | 清理蒙版模式：`ink`=墨迹蒙版（默认）；`full`=整矩形蒙版 | `ink` |
 | `--normalize-mode` | 供体归一化：`contrast`=对比度缩放（默认；供体/参考须有足够纸白-墨迹对比度，否则改用 `offset`）；`offset`=纯底色偏移 | `contrast` |
 
@@ -239,6 +241,7 @@ python3 scripts/identify_font.py --source page.png \
 ```
 
 判定"确定（明显领先）"才采用，且衬线应明显优于无衬线。
+仅有一个已装候选字体时只会给出「参考」，须安装更多候选再交叉验证，或结合文档类型判断。
 
 #### 第 3 步：识别字号
 
@@ -315,8 +318,8 @@ python3 scripts/scan_text_fusion.py --source page.png \
 | 300dpi 回渲 | 与确认 PNG 逐像素一致 |
 | 变化像素数 + 外框 | 与预期值比对 |
 | 允许区外变化 | `verify_outputs.py` 检查 = 0 |
-| 空白行深色像素 | 亮度 <180 的像素不超过上限 |
-| 应保留区域 | 无变化像素 |
+| 空白行深色像素 | 亮度 <180 的像素不超过上限；检查框须与图像有交集，否则验证失败 |
+| 应保留区域 | 无变化像素；检查框须与图像有交集，否则验证失败 |
 | 应删区域深色像素 | 不超过上限 |
 | 暗度匹配（模式 D） | 新字 `<100` 均值 vs 参考字 |
 | SHA-256 归档完整性 | `verify_outputs.py --strict-hash` |
@@ -359,8 +362,8 @@ python3 scripts/scan_edit_ops.py package \
 |---|---|---|
 | `--page-size` | 页面点尺寸 `W,H`（须两个有限正数；非法输入退出码 2） | 按 dpi 推算 |
 | `--dpi` | 无 `--page-size` 时用于推算；须为正整数（`<=0` 退出码 2） | 300 |
-| `--original-pdf` | 若给出则走替换内嵌图模式（保留 OCR）；多图页面按覆盖面积选整页图，全空 rect / 头部并列时会报错 | 无 |
-| `--page-index` | 替换模式下的页码（0-based） | 0 |
+| `--original-pdf` | 若给出则走替换内嵌图模式（保留 OCR）；多图页面按覆盖面积选整页图（同 xref 去重）；全空 rect / 头部并列时会报错 | 无 |
+| `--page-index` | 替换模式下的页码（0-based；须在页数范围内，越界报错） | 0 |
 
 ### 方式二：替换内嵌图（PyMuPDF，保留 OCR 层）
 
@@ -397,7 +400,7 @@ python3 scripts/scan_edit_ops.py package \
 | `--font` | 字体（路径/注册名/文件名） | 本机首个可用 CJK 字体 |
 | `--font-size` | 字号 | 31 |
 | `--ink-color R G B` | 笔画主体色 | 90 97 106 |
-| `--reference-box` | 框选参考文字自动取样 | - |
+| `--reference-box` | 框选参考文字自动取样（须非负且有序） | - |
 | `--halo-color R G B` | 边缘晕染色 | 178 196 211 |
 | `--stage` | clean/fusion/halo/all | halo |
 | `--scan-style` | clean/rough | rough |
@@ -426,14 +429,14 @@ python3 scripts/identify_size.py --source page.png --font <字体> \
 ```
 
 `--font` 接受三种写法：完整路径、注册名（如 `仿宋`）、纯文件名。注册名/文件名会经
-`font_registry.find_font()` 解析成真实路径与 ttc 索引；`--font-index` 仅当 `--font`
-是显式路径时生效。找不到字体时报错退出（码 2），不再像旧版那样因 `ImageFont.truetype`
-报 `cannot open resource` 而崩在渲染步骤。
+`font_registry.find_font()` 解析成真实路径与 ttc 索引（注册名匹配大小写不敏感）；
+`--font-index` 仅当 `--font` 是显式路径时生效。找不到字体时报错退出（码 2），不再像旧版
+那样因 `ImageFont.truetype` 报 `cannot open resource` 而崩在渲染步骤。`--ref` 框须非负且有序。
 
 ### font_registry.py（跨平台字体注册表）
 
-`--font` 接受三种写法：完整路径、注册名（如 `仿宋`）、纯文件名。不给时按正文优先级
-（仿宋 > 宋体 > STSong > …）取本机首个可用 CJK 字体。
+`--font` 接受三种写法：完整路径、注册名（如 `仿宋` / `songti`）、纯文件名。不给时按正文优先级
+（仿宋 > 宋体 > STSong > …）取本机首个可用 CJK 字体。注册名模糊匹配大小写不敏感。
 
 FONT_DIRS 覆盖 Windows / macOS / Linux 常见目录，包括 macOS 用户级 `~/Library/Fonts`
 （双击字体文件"为我安装"的默认落点）和网络共享 `/Network/Library/Fonts`。macOS 上安装

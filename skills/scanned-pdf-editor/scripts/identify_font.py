@@ -113,8 +113,24 @@ def best_ncc(target_gray, font_path, idx, char):
 
 def parse_ref(s):
     """char=x1,y1,x2,y2 -> (char, (x1,y1,x2,y2))"""
+    # BUG-046：坐标个数错时旧实现 `x1,y1,x2,y2 = (...)` 直接 ValueError 裸 traceback。
+    if '=' not in s:
+        raise SystemExit(f"错误: --ref 格式应为 字符=x1,y1,x2,y2，收到: {s!r}")
     name, coords = s.split('=', 1)
-    x1, y1, x2, y2 = (int(v) for v in coords.split(','))
+    parts = [v.strip() for v in coords.split(',')]
+    if len(parts) != 4:
+        raise SystemExit(
+            f"错误: --ref 坐标需为 4 个值 x1,y1,x2,y2，收到 {len(parts)} 个: {coords!r}"
+        )
+    try:
+        x1, y1, x2, y2 = (int(v) for v in parts)
+    except ValueError:
+        raise SystemExit(f"错误: --ref 坐标需为整数，收到: {coords!r}")
+    # BUG-037：负坐标会静默回绕，与 scan_edit_ops.parse_box 一致地拒绝。
+    if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0:
+        raise SystemExit(f"错误: --ref 坐标需全部非负，收到: {coords!r}")
+    if x1 >= x2 or y1 >= y2:
+        raise SystemExit(f"错误: --ref 坐标需满足 x1<x2 且 y1<y2，收到: {coords!r}")
     return name.strip(), (x1, y1, x2, y2)
 
 
@@ -131,8 +147,15 @@ def main():
     arr = np.asarray(im).astype(np.float32)
 
     targets = {}
+    seen_chars: set[str] = set()
     for spec in args.ref:
         ch, box = parse_ref(spec)
+        # BUG-046：同一字符名多次给出时旧实现静默覆盖，后面框取代前面框，
+        # 用户可能误以为两个框都被采用。无论墨迹是否有效都应显式警告。
+        if ch in seen_chars:
+            print(f'警告: 参考字 {ch} 重复给出，后一个框 {box} 覆盖前一个。'
+                  '若想用多个字，请给不同的字符名。', file=sys.stderr)
+        seen_chars.add(ch)
         x1, y1, x2, y2 = box
         g = ink_bbox(arr[y1:y2, x1:x2])
         if g is None:
@@ -145,8 +168,16 @@ def main():
     print(f'参考字: {", ".join(targets.keys())}  (高度归一化到 {HN}px)\n')
 
     if args.candidates:
+        # BUG-046：尾逗号（如 "仿宋=x.ttf,"）产生空项，split('=') 值不够解包 → 裸 traceback。
+        # 过滤空项并校验每项含 '='。
         cands = {}
         for item in args.candidates.split(','):
+            item = item.strip()
+            if not item:
+                continue
+            if '=' not in item:
+                print(f'错误: --candidates 每项格式应为 名称=文件名，收到: {item!r}', file=sys.stderr)
+                sys.exit(2)
             name, fn = item.split('=', 1)
             cands[name.strip()] = (fn.strip(), 0)
     else:
@@ -187,7 +218,12 @@ def main():
     margin = top_score - second_score
     # 以"总分 / 字数"作为单字均分判断
     avg = top_score / len(targets)
-    if avg >= 0.6 and margin >= 0.15 * len(targets):
+    # BUG-043：只有一个已装候选时 second_score=0，margin=总分必然达标，均分≥0.6
+    # 即误判"确定（明显领先）"——这正是该脚本核心使用场景（只装了目标字体），
+    # 且"确定"会抑制下方"目标字体可能未安装"的提示。只有一个候选时不允许判"确定"。
+    if len(ranked) < 2:
+        verdict = '参考（仅一个已装候选，无法比较领先度，建议安装更多候选字体以交叉验证）'
+    elif avg >= 0.6 and margin >= 0.15 * len(targets):
         verdict = '确定（明显领先）'
     elif avg >= 0.5:
         verdict = '参考（领先不足，建议增加参考字或结合文档类型）'

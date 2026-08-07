@@ -47,6 +47,13 @@ def parse_box(s: str) -> utils.Box:
         raise argparse.ArgumentTypeError(f"坐标格式应为 x1,y1,x2,y2，收到: {s}")
     box = tuple(int(p) for p in parts)
     x1, y1, x2, y2 = box
+    # BUG-037：负坐标会被 numpy 当成"从末尾倒数"的负索引，把操作静默移到错误区域
+    # （如 x1=-50 实际覆盖第 50..倒数第 50 列），全程无报错。像素坐标必须非负。
+    if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0:
+        raise argparse.ArgumentTypeError(
+            f"坐标需全部非负（像素坐标），收到: {s}（解析为 {box}）。"
+            "请检查是否误用了负值或计算溢出。"
+        )
     # BUG-028：倒置框（x2<x1 或 y2<y1）静默接受后产生空切片，删除等操作无效果。
     if x1 >= x2 or y1 >= y2:
         raise argparse.ArgumentTypeError(
@@ -291,6 +298,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     if args.blank_box:
         box = parse_box(args.blank_box)
+        # BUG-039：框完全越界时切片为空，dark=0 被误读为"验证通过"。
+        # 框必须与图像有交集，否则没有检查任何像素，验证结论无效。
+        bx1, by1, bx2, by2 = box
+        rh, rw = result.shape[:2]
+        ix1, iy1 = max(0, bx1), max(0, by1)
+        ix2, iy2 = min(rw, bx2), min(rh, by2)
+        if ix1 >= ix2 or iy1 >= iy2:
+            print(
+                f"错误: --blank-box {box} 与图像 {rw}×{rh} 没有交集，"
+                "验证未覆盖任何像素。",
+                file=sys.stderr,
+            )
+            return 1
         dark = utils.blank_region_dark_pixels(result, box, threshold=args.blank_threshold)
         print(f"blank_dark_pixels={dark} (threshold<{args.blank_threshold})")
         limit = args.blank_limit if args.blank_limit is not None else 0
@@ -300,8 +320,21 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     if args.preserve_box:
         box = parse_box(args.preserve_box)
+        # BUG-039：与 blank-box 同理，完全越界的 preserve-box 会得到空切片、
+        # preserved=0 被误读为"应保留区域无变化"。
+        px1, py1, px2, py2 = box
+        rh, rw = result.shape[:2]
+        ix1, iy1 = max(0, px1), max(0, py1)
+        ix2, iy2 = min(rw, px2), min(rh, py2)
+        if ix1 >= ix2 or iy1 >= iy2:
+            print(
+                f"错误: --preserve-box {box} 与图像 {rw}×{rh} 没有交集，"
+                "验证未覆盖任何像素。",
+                file=sys.stderr,
+            )
+            return 1
         preserved = int(np.count_nonzero(
-            np.any(source[box[1]:box[3], box[0]:box[2]] != result[box[1]:box[3], box[0]:box[2]], axis=2)
+            np.any(source[py1:py2, px1:px2] != result[py1:py2, px1:px2], axis=2)
         ))
         print(f"preserve_region_changes={preserved}")
         if preserved > 0:
@@ -480,7 +513,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    # BUG-046：多框参数（--boxes / --cleanup-boxes / --clear-boxes / --remove-boxes /
+    # --allowed-boxes）用 nargs="+" + 循环 parse_box，坏坐标会从循环里抛
+    # ArgumentTypeError / ValueError 裸 traceback。集中捕获，打印清晰错误并 exit 2，
+    # 与 argparse 原生的坏参数行为一致。
+    try:
+        return args.func(args)
+    except argparse.ArgumentTypeError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

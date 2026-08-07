@@ -47,10 +47,15 @@ def render_pdf_page(
     dpi: int = 300,
 ) -> Image.Image:
     """使用 PDFium 稳定回渲单页；300 dpi 基准图均由此方式得到。"""
+    # BUG-046：PdfDocument 是底层 PDFium 句柄，不关闭会泄漏文件描述符，
+    # 批量验证（verify_outputs 逐用例渲染）时可能耗尽。用 try/finally 确保 close。
     document = pdfium.PdfDocument(str(pdf_path))
-    if not 0 <= page_index < len(document):
-        raise IndexError(f"页码越界: {page_index + 1}/{len(document)}")
-    image = document[page_index].render(scale=dpi / 72).to_pil().convert("RGB")
+    try:
+        if not 0 <= page_index < len(document):
+            raise IndexError(f"页码越界: {page_index + 1}/{len(document)}")
+        image = document[page_index].render(scale=dpi / 72).to_pil().convert("RGB")
+    finally:
+        document.close()
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         image.save(output_path, dpi=(dpi, dpi))
@@ -59,10 +64,14 @@ def render_pdf_page(
 
 def pdf_page_info(pdf_path: Path) -> tuple[int, tuple[float, float]]:
     """返回 (页数, 第一页的点尺寸)。"""
+    # BUG-046：与 render_pdf_page 同样，PdfDocument 句柄须关闭。
     document = pdfium.PdfDocument(str(pdf_path))
-    if not len(document):
-        raise ValueError(f"PDF 没有页面: {pdf_path}")
-    return len(document), tuple(float(value) for value in document[0].get_size())
+    try:
+        if not len(document):
+            raise ValueError(f"PDF 没有页面: {pdf_path}")
+        return len(document), tuple(float(value) for value in document[0].get_size())
+    finally:
+        document.close()
 
 
 def save_image_as_pdf(
@@ -118,24 +127,31 @@ def replace_pdf_image(
     """
     import fitz
 
+    # BUG-048：fitz 文档句柄不在 try/finally 中，异常时泄漏文件描述符
+    # （与 BUG-046 的 render_pdf_page / pdf_page_info 同族但遗漏了此处）。
+    # 同时补 page_index 越界校验——fitz 的负索引会回绕到末页，静默替换错误页面。
     document = fitz.open(str(pdf_path))
-    page = document[page_index]
-    images = page.get_images(full=True)
-    if not images:
-        raise RuntimeError("页面中没有可替换的内嵌图像。")
+    try:
+        if not 0 <= page_index < len(document):
+            raise IndexError(f"页码越界: {page_index + 1}/{len(document)}")
+        page = document[page_index]
+        images = page.get_images(full=True)
+        if not images:
+            raise RuntimeError("页面中没有可替换的内嵌图像。")
 
-    xref = _select_page_image_xref(page, images, strict=strict)
+        xref = _select_page_image_xref(page, images, strict=strict)
 
-    # 与 save_image_as_pdf 行为一致：替换内嵌图模式同样自动创建输出父目录，
-    # 否则写入尚未创建的嵌套目录时报 FzErrorSystem: No such file or directory。
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+        # 与 save_image_as_pdf 行为一致：替换内嵌图模式同样自动创建输出父目录，
+        # 否则写入尚未创建的嵌套目录时报 FzErrorSystem: No such file or directory。
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    buffer = BytesIO()
-    image.save(buffer, format="PNG", optimize=True)
-    page.replace_image(xref, stream=buffer.getvalue())
-    temporary = output_path.with_suffix(".tmp.pdf")
-    document.save(str(temporary), garbage=4, deflate=True)
-    document.close()
+        buffer = BytesIO()
+        image.save(buffer, format="PNG", optimize=True)
+        page.replace_image(xref, stream=buffer.getvalue())
+        temporary = output_path.with_suffix(".tmp.pdf")
+        document.save(str(temporary), garbage=4, deflate=True)
+    finally:
+        document.close()
     temporary.replace(output_path)
 
 
@@ -146,6 +162,9 @@ def _select_page_image_xref(page, images: list, *, strict: bool = True) -> int:
     单图：直接返回唯一 xref（即使 get_image_rects 为空——此时无可选替代，
     replace_image 仍可按 xref 替换）。多图：按覆盖比例选最大；全部 rect 为空
     时报错；``strict`` 下若头部并列也会报错。
+
+    同一张图在页面上放置多次时 get_images 会返回重复 xref（如 [5, 5]），
+    先按 xref 去重再评分，避免 strict 误报"两个过近"（BUG-036）。
     """
     if len(images) == 1:
         return images[0][0]
@@ -153,9 +172,16 @@ def _select_page_image_xref(page, images: list, *, strict: bool = True) -> int:
     page_rect = page.rect
     page_area = float(page_rect.width * page_rect.height) or 1.0
 
+    # BUG-036：同一张图在页面上放置两次时 get_images 会返回重复 xref（如 [5, 5]），
+    # 重复条目各自评分后"并列"会触发 strict 的"两个过近"误报，使 replace --original-pdf
+    # 完全不可用。按 xref 去重后再评分——同一 xref 的多块面积已由 get_image_rects 合并。
     scored = []
+    seen_xrefs: set[int] = set()
     for entry in images:
         xref = entry[0]
+        if xref in seen_xrefs:
+            continue
+        seen_xrefs.add(xref)
         try:
             rects = page.get_image_rects(xref)
         except Exception:
@@ -198,8 +224,12 @@ def feather_mask(width: int, height: int, edge: int = 4) -> np.ndarray:
     """生成边缘羽化的 alpha 蒙版，用于供体贴入时平滑过渡。
 
     edge <= 0 时返回全 1 蒙版（硬边无羽化），避免除零产生 NaN（BUG-029）。
+    任一维度 ≤ 2 时也返回全 1 蒙版：此时每个像素都贴着边缘，distance 恒为 0，
+    alpha 全 0 会让供体被静默丢弃（BUG-046）。小到无法羽化的块应整块贴入。
     """
     if edge <= 0:
+        return np.ones((height, width, 1), dtype=np.float32)
+    if width <= 2 or height <= 2:
         return np.ones((height, width, 1), dtype=np.float32)
     yy, xx = np.mgrid[0:height, 0:width]
     distance = np.minimum.reduce((xx, width - 1 - xx, yy, height - 1 - yy)).astype(
@@ -431,9 +461,16 @@ def move_block(
             f"source_y 需满足 y1<y2，收到: {source_y}。"
             "请检查纵向起止是否写反或输入了空区间。"
         )
+    # BUG-037/BUG-038：x1<0 会被 numpy 当负索引静默绕到页尾，x2 超宽会被静默截断，
+    # 二者都让操作落到错误区域且 cleanup 仍照跑。与 y 方向（BUG-020）对称校验。
+    img_h, img_w = image.shape[0], image.shape[1]
+    if x1 < 0 or x2 > img_w:
+        raise ValueError(
+            f"content_x={content_x} 越出页面宽度 {img_w}（x 需在 [0, {img_w}] 内）。"
+            "请核对 --content-x 坐标。"
+        )
     # BUG-020：shift_y 过大使目标 y 为负时，Python 负切片会把块静默写到页底，
     # 产出看似正常的错误结果。越界直接报错，绝不静默绕行。
-    img_h = image.shape[0]
     if y1 - shift_y < 0 or y2 - shift_y > img_h:
         raise ValueError(
             f"shift_y={shift_y} 使目标位置 y=[{y1 - shift_y}, {y2 - shift_y}) "
@@ -488,8 +525,14 @@ def move_and_clear(
             f"source_y 需满足 y1<y2，收到: {source_y}。"
             "请检查纵向起止是否写反或输入了空区间。"
         )
+    # BUG-037/BUG-038：与 move_block 相同，x 方向越界（负索引绕尾 / 超宽截断）直接报错。
+    img_h, img_w = image.shape[0], image.shape[1]
+    if x1 < 0 or x2 > img_w:
+        raise ValueError(
+            f"content_x={content_x} 越出页面宽度 {img_w}（x 需在 [0, {img_w}] 内）。"
+            "请核对 --content-x 坐标。"
+        )
     # BUG-020：与 move_block 相同，目标越界直接报错，避免负切片静默绕到页底。
-    img_h = image.shape[0]
     if y1 - shift_y < 0 or y2 - shift_y > img_h:
         raise ValueError(
             f"shift_y={shift_y} 使目标位置 y=[{y1 - shift_y}, {y2 - shift_y}) "
@@ -627,9 +670,24 @@ def replace_with_donor(
     erased, mask = remove_regions_telea(
         image, remove_boxes, ink_threshold=ink_threshold, mask_mode=mask_mode
     )
+    # BUG-040：donor_box / reference_box 越界时 numpy 切片会静默截小，供体贴不满
+    # 目标区（部分越界）或取到空块→误导性的"未找到暗色墨迹"（完全越界）。
+    # 入口处校验二者完整落在各自图像内，坐标错误时给清晰提示。
     dx1, dy1, dx2, dy2 = donor_box
-    donor_patch = donor_image[dy1:dy2, dx1:dx2]
+    dh, dw = donor_image.shape[:2]
+    if dx1 < 0 or dy1 < 0 or dx2 > dw or dy2 > dh:
+        raise ValueError(
+            f"donor_box={donor_box} 越出供体图像 {dw}×{dh}。"
+            "请检查 --donor-box 坐标是否为供体图像内的像素坐标。"
+        )
     rx1, ry1, rx2, ry2 = reference_box
+    sh, sw = image.shape[:2]
+    if rx1 < 0 or ry1 < 0 or rx2 > sw or ry2 > sh:
+        raise ValueError(
+            f"reference_box={reference_box} 越出目标图像 {sw}×{sh}。"
+            "请检查 --reference-box 坐标是否为目标图像内的像素坐标。"
+        )
+    donor_patch = donor_image[dy1:dy2, dx1:dx2]
     reference = image[ry1:ry2, rx1:rx2]
     dest_x, dest_y = destination
     patch_height, patch_width = donor_patch.shape[:2]
@@ -677,7 +735,18 @@ def blank_region_dark_pixels(
 ) -> int:
     """检查空白区域的深色像素数，用于验证删除是否干净。"""
     x1, y1, x2, y2 = box
-    return int(np.count_nonzero(luma(image[y1:y2, x1:x2]) < threshold))
+    # BUG-039：框完全越界时切片为空，dark=0 会被误读成"验证通过"。
+    # 这里只校验语法上是否为空框（x1>=x2 或 y1>=y2）；框落在图外的情况
+    # 由调用方（cmd_verify）裁剪到图像边界后判空处理。
+    if x1 >= x2 or y1 >= y2:
+        raise ValueError(f"检查框 {box} 为空（x1>=x2 或 y1>=y2），无法统计深色像素。")
+    region = image[y1:y2, x1:x2]
+    if region.size == 0:
+        raise ValueError(
+            f"检查框 {box} 与图像 {image.shape[:2]} 没有交集，无法统计深色像素。"
+            "请核对坐标是否为像素坐标或是否越界。"
+        )
+    return int(np.count_nonzero(luma(region) < threshold))
 
 
 def sha256_file(path: Path) -> str:

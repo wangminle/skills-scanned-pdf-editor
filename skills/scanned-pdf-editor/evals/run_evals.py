@@ -81,6 +81,11 @@ def trigger_match(description: str, prompt: str) -> bool:
        适用于已建立扫描 PDF 上下文后的后续指令（用户不会再重复说"扫描版PDF"）
 
     动作词覆盖口语变体：移/换/加上/补/清掉 等。
+
+    注意：``description``（SKILL.md frontmatter description）本身不参与本函数的
+    prompt 匹配——它由 ``run_trigger_evals`` 单独校验：正例用例的 keywords 必须
+    出现在 description 中，否则 skill 描述无法被模型触发匹配，触发测试即名存实亡
+    （BUG-047）。
     """
     prompt_lower = prompt.lower()
     desc_keywords = ["扫描", "pdf", "扫描件", "扫描版"]
@@ -109,6 +114,22 @@ def run_trigger_evals(cases: list[dict], verbose: bool = False) -> tuple[int, in
     if verbose:
         print(f"  Skill description: {description[:80]}...")
 
+    # BUG-047：旧实现加载了 description 却从不使用——删掉 description 里全部触发词，
+    # 8 项触发 eval 仍全绿，触发测试名存实亡。正例用例的 keywords 必须至少有一个
+    # 出现在 description 中，否则 skill 描述无法被模型触发匹配。
+    desc_lower = description.lower()
+    missing_keyword_cases: list[str] = []
+    for case in cases:
+        if case["category"] != "trigger":
+            continue
+        if not case.get("should_trigger"):
+            continue
+        keywords = case.get("keywords") or []
+        if keywords and not any(kw.lower() in desc_lower for kw in keywords):
+            missing_keyword_cases.append(
+                f"{case['id']}: keywords {keywords} 均未出现在 skill description 中"
+            )
+
     passed = 0
     total = 0
     for case in cases:
@@ -126,6 +147,13 @@ def run_trigger_evals(cases: list[dict], verbose: bool = False) -> tuple[int, in
                 print(f"    prompt: {prompt}")
         if ok:
             passed += 1
+
+    # 关键词覆盖校验：正例的触发词必须能从 description 里找到，否则 prompt 匹配通过
+    # 也不代表 skill 真的能被触发（description 是模型看到的触发依据）。
+    for msg in missing_keyword_cases:
+        print(f"  [FAIL] {msg}")
+        total += 1
+
     return passed, total
 
 
@@ -295,12 +323,18 @@ def run_single_behavior(case, mode, cli_args, src_path, out_path, original_img):
             args_c = args[:]
             args_c[mode_idx] = "contrast"
             args_c[args_c.index("--output") + 1] = str(out_contrast_path)
-            run_cli(args_c, SCRIPTS_DIR)
-            if out_contrast_path.exists():
-                out_c = np.asarray(Image.open(out_contrast_path))
-                diff = np.sum(out != out_c)
-                if diff == 0:
-                    return False, "offset 与 contrast 输出相同"
+            # BUG-042：旧实现不检查对照运行的返回码——contrast 跑挂时整个 diff 块
+            # 被跳过，BEH-006 假绿，eval 失去回归保护。对照运行失败必须显式判失败。
+            result_c = run_cli(args_c, SCRIPTS_DIR)
+            if result_c.returncode != 0:
+                return False, (f"contrast 对照运行失败（退出码 {result_c.returncode}）: "
+                               f"{result_c.stderr[:200]}")
+            if not out_contrast_path.exists():
+                return False, "contrast 对照运行未产出输出文件"
+            out_c = np.asarray(Image.open(out_contrast_path))
+            diff = np.sum(out != out_c)
+            if diff == 0:
+                return False, "offset 与 contrast 输出相同"
         return True, "尺寸一致、目标有内容"
 
     return False, f"未知模式: {mode}"

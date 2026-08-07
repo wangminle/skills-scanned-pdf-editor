@@ -122,15 +122,21 @@ def render_case_page(
         return np.asarray(utils.render_pdf_page(path, page_index=page_index, dpi=dpi))
     if backend == "pymupdf":
         import fitz
+        # BUG-049：与 BUG-048 同族--fitz 文档句柄须 try/finally 关闭，
+        # page_index 须校验避免负索引回绕静默渲染末页。
         document = fitz.open(str(path))
-        page = document[page_index]
-        pixmap = page.get_pixmap(
-            matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False
-        )
-        image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
-            pixmap.height, pixmap.width, pixmap.n
-        )[..., :3].copy()
-        document.close()
+        try:
+            if not 0 <= page_index < len(document):
+                raise IndexError(f"页码越界: {page_index + 1}/{len(document)}")
+            page = document[page_index]
+            pixmap = page.get_pixmap(
+                matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False
+            )
+            image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
+                pixmap.height, pixmap.width, pixmap.n
+            )[..., :3].copy()
+        finally:
+            document.close()
         return image
     raise ValueError(f"未知渲染后端：{backend}")
 
@@ -192,6 +198,16 @@ def verify(case: VerifyCase, *, strict_hash: bool, reproduce: bool = False) -> l
     source = render_case_page(
         case.source_pdf, case.render_backend, case.render_dpi, page_index=case.page_index
     )
+    # BUG-041：源/终版页尺寸不一致时 image_diff 会抛 ValueError 裸 traceback，
+    # 该错误不归档到用例，后续所有用例被静默跳过，已记录错误也不输出。
+    # 这里先比 shape 短路：记录为该用例的错误并提前返回，不进入 image_diff。
+    if source.shape != final.shape:
+        errors.append(
+            f"源 PDF 与终版 PDF 的 {case.render_dpi}dpi 回渲尺寸不一致: "
+            f"源 {source.shape[:2]} vs 终版 {final.shape[:2]}。"
+            "通常意味着源/终版页面点尺寸不同，请核对配置的 page_size 或源/终版是否对应同一页面。"
+        )
+        return errors
     stats = utils.image_diff(source, final)
 
     if case.expected_changed_pixels is not None and stats.changed_pixels != case.expected_changed_pixels:
@@ -302,7 +318,12 @@ def main() -> int:
     all_errors: list[str] = []
     for case in cases:
         print(f"[{case.name}]")
-        errors = verify(case, strict_hash=args.strict_hash, reproduce=args.reproduce)
+        # BUG-041：单个用例抛异常时不能让整个 main 崩掉、后续用例被静默跳过。
+        # 逐用例 try/except，把异常归档为该用例的错误，继续跑剩余用例。
+        try:
+            errors = verify(case, strict_hash=args.strict_hash, reproduce=args.reproduce)
+        except Exception as exc:  # noqa: BLE001 —— 验证器最该抓的就是这类错误
+            errors = [f"验证过程异常: {type(exc).__name__}: {exc}"]
         if errors:
             all_errors.extend(f"{case.name}：{error}" for error in errors)
         else:
