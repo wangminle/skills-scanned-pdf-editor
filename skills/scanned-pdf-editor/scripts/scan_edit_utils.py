@@ -53,7 +53,13 @@ def render_pdf_page(
     try:
         if not 0 <= page_index < len(document):
             raise IndexError(f"页码越界: {page_index + 1}/{len(document)}")
-        image = document[page_index].render(scale=dpi / 72).to_pil().convert("RGB")
+        page = document[page_index]
+        # PDFium 的 render(rotation=0) 内部已自动应用页面 /Rotate 条目：
+        # FPDF_GetPageWidthF/HeightF 返回的是旋转后的显示尺寸，渲染时内容也按
+        # /Rotate 旋转。render() 的 rotation 参数是「附加旋转」，在其基础上再转。
+        # 因此传 rotation=get_rotation() 会双重旋转（BUG-058）。正确做法是
+        # rotation=0，让 PDFium 自行处理 /Rotate，输出即用户在阅读器中看到的朝向。
+        image = page.render(scale=dpi / 72, rotation=0).to_pil().convert("RGB")
     finally:
         document.close()
     if output_path is not None:

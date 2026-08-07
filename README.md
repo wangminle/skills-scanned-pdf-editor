@@ -55,15 +55,13 @@ Two technical routes share the same goal (“looks like the original scan”):
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Session conventions for agents
 ├── task-list.md              # Project task ledger
-├── design/                   # Research & skill design analysis
-├── docs/                     # Implementation / ops plans
+├── design/                   # Research, skill design analysis & plans
 └── skills/
     └── scanned-pdf-editor/   # The publishable Agent Skill
         ├── SKILL.md          # Agent instructions (source of truth for workflow)
         ├── README.md         # Skill-local quick start & script map
         ├── scripts/          # CLI tools & libraries
-        ├── references/       # Pipeline methodology
-        ├── evals/            # Deterministic checks + real-model eval guide
+        ├── references/       # Pipeline methodology & script reference
         └── verify_config.example.json
 ```
 
@@ -151,21 +149,21 @@ Scripts under `scripts/` are importable modules—there is no separate packaged 
 | `scan_edit_ops.py` | CLI orchestration over those helpers |
 | `scan_text_fusion.py` | Fusion / halo rendering for added text |
 | `font_registry.py` | Cross-platform CJK font resolve |
+| `check_fonts.py` | CJK font installation status & setup guide |
 | `identify_font.py` / `identify_size.py` | Measurement CLIs |
+| `align_text.py` | Vertical ink-center alignment for added text |
 | `verify_outputs.py` | JSON-driven verification |
 
 Prefer calling the CLIs from agents; import helpers only when embedding in your own pipeline.
 
-### Checks & evaluation
+### Checks
 
 ```bash
 cd skills/scanned-pdf-editor/scripts
-./run_checks.sh          # ruff + pytest
-python3 -m pytest test_skill.py -v
-cd ../evals && python3 run_evals.py   # deterministic keyword/CLI smoke (not a live model)
+./run_checks.sh          # ruff + pytest (run from repo root: ../../tests/scripts/test_skill.py)
 ```
 
-Real with-skill / without-skill model evaluation is documented in [`evals/EVAL.md`](skills/scanned-pdf-editor/evals/EVAL.md) and may require local test PDFs.
+`run_checks.sh` runs `ruff check` across the skill plus the pytest suite located at `tests/scripts/test_skill.py` (in the repo root, not shipped with the skill). End-to-end verification of edited PDFs uses `verify_outputs.py` with a JSON config (see the skill README).
 
 ### License
 
@@ -222,15 +220,13 @@ Real with-skill / without-skill model evaluation is documented in [`evals/EVAL.m
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Agent 会话约定
 ├── task-list.md              # 任务台账
-├── design/                   # 研究与 skill 设计分析
-├── docs/                     # 实施 / 运维计划
+├── design/                   # 研究、skill 设计分析与实施计划
 └── skills/
     └── scanned-pdf-editor/   # 可发布的 Agent Skill
         ├── SKILL.md          # Agent 工作流说明（权威文档）
         ├── README.md         # Skill 内快速开始与脚本索引
         ├── scripts/          # CLI 与工具库
-        ├── references/       # 管线方法论
-        ├── evals/            # 确定性自检 + 真实模型评测指南
+        ├── references/       # 管线方法论与脚本参考
         └── verify_config.example.json
 ```
 
@@ -307,21 +303,21 @@ python3 scripts/verify_outputs.py --config verify_config.example.json --reproduc
 | `scan_edit_ops.py` | 上述能力的 CLI 编排 |
 | `scan_text_fusion.py` | 补录融合 / 晕染 |
 | `font_registry.py` | 跨平台 CJK 字体解析 |
+| `check_fonts.py` | CJK 字体安装检查与安装引导 |
 | `identify_font.py` / `identify_size.py` | 测量 CLI |
+| `align_text.py` | 新增文字垂直墨迹中心对齐 |
 | `verify_outputs.py` | JSON 驱动验证 |
 
 Agent 场景优先调 CLI；嵌入自有管线时再 import 工具函数。
 
-### 检查与评测
+### 检查
 
 ```bash
 cd skills/scanned-pdf-editor/scripts
 ./run_checks.sh
-python3 -m pytest test_skill.py -v
-cd ../evals && python3 run_evals.py   # 确定性自检，不跑真实模型
 ```
 
-真实 with-skill / without-skill 评测见 [`evals/EVAL.md`](skills/scanned-pdf-editor/evals/EVAL.md)，可能需要本地测试 PDF。
+`run_checks.sh` 跑 `ruff check` 全量静态检查 + pytest 套件（测试文件在仓库根 `tests/scripts/test_skill.py`，不随 skill 分发）。编辑后 PDF 的端到端验证用 `verify_outputs.py` 配 JSON 配置驱动（见 skill README）。
 
 ### 许可证
 

@@ -63,6 +63,17 @@
 | BUG-049 | 修复 | verify_outputs.py render_case_page 的 pymupdf 后端同样缺 try/finally 和 page_index 校验（与 BUG-048 同族），pdfium 路径已在 BUG-046 修复但 pymupdf 路径被遗漏 | 2026-08-07 12:30 | 2026-08-07 12:45 | 已修复 | pymupdf 路径加 try/finally 关闭 document；page_index 越界 IndexError；见 [[TST-016]] [[CHK-025]] |
 | BUG-050 | 修复 | identify_size.py --ref 解析用 r.split('=') / box.split(',') 无校验：缺等号、坐标个数错、负坐标回绕均产生裸 traceback 或静默错位（与 BUG-037 同族），identify_font.parse_ref 已有完整校验但此处未对齐 | 2026-08-07 12:30 | 2026-08-07 12:45 | 已修复 | 新增 parse_ref 函数与 identify_font.parse_ref 对齐（格式/个数/整数/非负/有序校验）；见 [[TST-016]] [[CHK-025]] |
 | BUG-051 | 修复 | scan_text_fusion.py --reference-box / --sample-only / --crop-box 用 type=int nargs=4 直接接收，负坐标在 numpy 切片 / PIL crop 中静默回绕或截断到错误区域（与 BUG-037 同族） | 2026-08-07 12:30 | 2026-08-07 12:45 | 已修复 | 新增 validate_box 校验非负+x1<x2+y1<y2，三处调用点均接入；见 [[TST-016]] [[CHK-025]] |
+| BUG-052 | 修复 | render_pdf_page (pypdfium2) 默认不应用页面 /Rotate 旋转：page.render(rotation=None) 等价于 rotation=0，有 /Rotate 的 PDF 渲染结果方向可能错误（端到端测试 task001 发现：页面 /Rotate=270，默认渲染为 portrait 1655×2341，显式 rotation=270 才输出 landscape 2341×1655） | 2026-08-07 20:30 | 2026-08-07 22:00 | 已修复 | 修复：render_pdf_page 增加 page.get_rotation() 并传 rotation=rotation 给 render()；测试 test_render_pdf_page_applies_rotation 验证旋转后方向正确；见 [[TST-018]] [[PLN-003]] |
+| BUG-053 | 修复 | scan_text_fusion.py --reference-box 静默覆盖 --ink-color：同时指定两参数时 ink_color 被 sample_ink_color 返回值替换，--help 未说明此优先级，深墨色扫描件自动采样值融合后偏浅（task002 差值 15.8→手动指定深墨色后 0.5） | 2026-08-07 20:30 | 2026-08-07 22:00 | 已修复 | 修复：--ink-color default 改为 None，run() 实现三级优先（显式 > 采样 > 默认）；同时新增 --preview-ink 诊断模式；测试 test_ink_color_explicit_overrides_reference_box / test_ink_color_reference_box_when_no_explicit 验证；见 [[TST-018]] [[PLN-003]] |
+| BUG-054 | 修复 | 根 README.md 残留 evals 引用（ADJ-007 已删 evals/ 但未同步根 README）：目录树 2 处仍列 evals/、检查命令 `cd ../evals && python3 run_evals.py` 2 处执行即失败、`evals/EVAL.md` 死链 2 处；同节 `pytest test_skill.py` 仍是旧路径（ADJ-008 已移至 tests/scripts/） | 2026-08-07 21:09 | 2026-08-07 21:18 | 已修复 | 中英目录树删 evals 行、docs/ 改 design/；检查节删 evals 命令与死链，pytest 路径改为仓库根 tests/scripts/；见 [[CHK-030]] |
+| BUG-055 | 修复 | skill README.md L19 自测命令相对路径错误：`cd scripts` 后 `pytest ../../tests/scripts/test_skill.py` 解析为 skills/tests/（不存在），已实测报 No such file；应为 ../../../tests/scripts/test_skill.py | 2026-08-07 21:09 | 2026-08-07 21:18 | 已修复 | ../../→../../../（与 SKILL.md 写法对齐）；见 [[CHK-030]] |
+| BUG-056 | 修复 | 安装目录（~/.agents/skills、~/.claude/skills 两处）未同步本轮改动：缺 align_text.py / check_fonts.py，SKILL.md / identify_font.py / scan_edit_utils.py / scan_text_fusion.py 均为旧版——BUG-052/053 修复与 PLN-003 全部新工具在安装副本中不生效 | 2026-08-07 21:09 | 2026-08-07 21:18 | 已修复 | rsync -a --delete 镜像同步，diff -rq 校验两处与源完全一致；align_text/check_fonts/scripts_reference 均已就位；见 [[CHK-030]] |
+| BUG-057 | 修复 | SKILL.md 膨胀至 579 行，超过项目多次引用的 skill-creator <500 行约束（DOC-010/011 记录 468/471 行 <500）；本轮新增第 1.5/5 步与 check_fonts/align_text 两节所致 | 2026-08-07 21:09 | 2026-08-07 21:18 | 已修复 | 工具参考节（129 行完整参数表）下沉至 references/scripts_reference.md，SKILL.md 保留速查+链接，579→461 行 <500；见 [[CHK-030]] |
+| BUG-058 | 修复 | BUG-052「修复」把 `page.get_rotation()` 当作 pypdfium2 `render(rotation=)` 的附加旋转传入，对 `/Rotate` 90/270 页与内嵌 XObject 像素不一致（实测 Rotate=270：回渲与 embedded MAE≈71、顶底色条对调）；单测只断言宽高假绿；`package --original-pdf` / replace 可能写错朝向 | 2026-08-07 21:14 | 2026-08-07 21:56 | 已修复 | 根因：PDFium 的 FPDF_GetPageWidthF/HeightF 已返回旋转后尺寸，render() 内部已应用 /Rotate，rotation 参数是附加旋转；传 get_rotation() 等于双重旋转。改为 rotation=0，让 PDFium 自行处理 /Rotate。用真实 Rotate=270 扫描件验证：修复后 pypdfium2 与 fitz 渲染方向一致（MAE=3.6）；测试改为内容朝向断言（黑块位置）而非宽高；见 [[CHK-032]] |
+| BUG-059 | 修复 | `font_registry.find_font` 注册名用 `spec_l in name.lower()` 子串匹配过宽：`"Song"`/`"song"`/`"宋"`→仿宋 simfang，`"SC"`→Songti，`"GB"`→Hiragino，`"serif"`→Noto Serif；identify/fusion/align/size 静默选错字体 | 2026-08-07 21:14 | 2026-08-07 21:56 | 已修复 | 新增 `_name_tokens()` 把注册名拆成语义段（仿宋/FangSong/Songti/SC），匹配规则改为 token 精确/前缀（≥2 字符）+ 文件名精确/词干；中文走 token 路径（"宋"不是"仿宋"前缀不再误命中）；19 项匹配用例全部正确；见 [[CHK-032]] |
+| BUG-060 | 修复 | `scan_text_fusion` `--fusion-strength nan`：argparse `type=float` 接受 NaN，API 产出全黑图（min=max=0）仅 RuntimeWarning、CLI rc=0；负数 strength 在 API 层 `rng.normal(scale<0)` 裸 ValueError | 2026-08-07 21:14 | 2026-08-07 21:56 | 已修复 | main() 渲染前统一校验 fusion/halo/stroke-shoulder/core-alpha-scale 四参数有限且非负，nan/inf/负数 parser.error 退出码 2；见 [[CHK-032]] |
+| BUG-061 | 修复 | 框坐标未校验 ⊂ 图像：`scan_text_fusion.validate_box` / `align_text --ref-box` 只查非负有序；越界 ROI 静默截断，`--crop-box` 超界时 PIL crop 可扩出黑边；与 BUG-040 同族 | 2026-08-07 21:14 | 2026-08-07 21:56 | 已修复 | validate_box/parse_box/parse_ref(×2) 增加可选 image_size 参数校验框完整落在图内；run()/诊断模式/align main/identify main 调用点均传入图像尺寸；向后兼容（不传则不查越界）；见 [[CHK-032]] |
+| BUG-062 | 修复 | `check_fonts.py --filter` 裸 `split(",")`：尾逗号产生空串，`"" in name` 恒真导致过滤失效（`--filter 仿宋,` 列出远多于 `--filter 仿宋`）；带空格写法也会匹配失败 | 2026-08-07 21:14 | 2026-08-07 21:56 | 已修复 | main() 的 filter 解析改为 strip + 滤空段；CLI 实测 `--filter 仿宋` 与 `--filter 仿宋,` 输出行数一致；见 [[CHK-032]] |
 
 ## 调整事项
 
@@ -74,7 +85,8 @@
 | ADJ-004 | 调整 | verify_outputs.py --reproduce 泛化：配置支持 reproduce_command（shell 重跑）+ reproduce_image，缺省回退 expected_image 基准图 | 2026-08-05 19:40 | 2026-08-05 19:53 | 已完成 | 修复 [[BUG-004]]；docstring / 示例配置同步加 reproduce_command / reproduce_image 字段 |
 | ADJ-005 | 调整 | 补齐删除项目原脚本中的整矩形 Telea 清理、纯底色偏移归一化、task007 复制后清除复合流程 | 2026-08-05 20:01 | 2026-08-05 20:45 | 已完成 | G2: full_mask_in_boxes + remove_regions_telea(mask_mode="full") + replace_with_donor(mask_mode=) + CLI --mask-mode；G3: normalize_donor_patch(mode="offset") + paste_donor_patch/replace_with_donor(normalize_mode=) + CLI --normalize-mode；G6: move_and_clear() + compound 子命令；SKILL.md 模式 B+ 文档；见 [[TST-008]] [[CHK-008]] |
 | ADJ-006 | 调整 | identify_font.py 置信度不足（参考/存疑）且有未安装候选时，提示目标字体可能缺失并给出安装路径；无已装字体时也报错引导 | 2026-08-05 20:15 | 2026-08-05 20:25 | 已完成 | 三路径验证：确定不提示、参考/存疑提示安装路径、无已装字体报错+引导 exit 1；见 [[BUG-015]] |
-
+| ADJ-007 | 调整 | 移除 evals/ 目录：用户决定 skill 质量通过实际 CLI 使用验证，无需单独 eval 测试（tests/ 测试用例不随 skill 安装到用户环境，eval 引用外部文件无实际价值） | 2026-08-07 14:00 | 2026-08-07 19:15 | 已完成 | 删除 evals/ 全部文件（eval_cases.json/evals.json/run_evals.py/EVAL.md/README.md）；run_checks.sh ruff check .. -> .；README.md 移除 evals/ 行；test_skill.py 移除 7 项 evals 依赖测试 + 3 个 _load_run_evals 辅助方法，替换 2 项 BUG-027 测试；测试数 159->152；三处安装目录同步更新；见 [[BUG-018]] [[BUG-026]] [[BUG-027]] [[BUG-034]] [[BUG-042]] [[BUG-047]] [[TST-006]] [[TST-009]] |
+| ADJ-008 | 调整 | 将 test_skill.py 从 skills/scanned-pdf-editor/scripts/ 移至 tests/scripts/：测试文件属开发层面，不随 skill 安装到用户环境 | 2026-08-07 19:20 | 2026-08-07 19:25 | 已完成 | test_skill.py 中所有 Path(__file__).parent 改为 SCRIPTS_DIR 常量指向 skills 脚本目录；E402 加 noqa；run_checks.sh 用 PROJECT_ROOT 变量定位测试文件；README.md/SKILL.md 更新测试命令路径；三处安装目录同步删除 test_skill.py；152 passed / ruff 全清 / run_checks.sh ✅ |
 ## 检查事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -105,6 +117,14 @@
 | CHK-024 | 检查 | 独立复核 BUG-036～047 是否均已修复：源码逐项对照 + TestBugFix036_047 + 全量单测 | 2026-08-07 11:00 | 2026-08-07 11:00 | 已完成 | 12 项源码修复均在位；TestBugFix036_047 34/34 passed；全量 140 passed；与 [[CHK-023]]/[[TST-015]] 结论一致，待修复=0 |
 | CHK-025 | 检查 | 第六轮全项目 bug 复查：140 单测基线全过后逐文件审查，发现 [[BUG-048]]～[[BUG-051]]（fitz 句柄泄漏/越界、coordinate 校验遗漏），修复后全量回归 | 2026-08-07 12:30 | 2026-08-07 12:45 | 已完成 | 159 passed（140 原 + 19 新 TestBugFix048_051）；ruff check . 全清；run_checks.sh ✅；evals 17/17；见 [[BUG-048]]..[[BUG-051]] [[TST-016]] |
 | CHK-026 | 检查 | 独立复核 BUG-048～051 是否均已修复：源码逐项对照 + TestBugFix048_051 | 2026-08-07 11:24 | 2026-08-07 11:24 | 已完成 | 4 项源码修复均在位；TestBugFix048_051 19/19 passed；与 [[CHK-025]]/[[TST-016]] 结论一致 |
+| CHK-027 | 检查 | 端到端测试结果与期望效果像素级对比：全页一致率、新增文字区域墨色/笔画密度/位置对齐/字体校验 | 2026-08-07 20:30 | 2026-08-07 21:30 | 已完成 | task001：全页一致率 99.90%，原文完全一致，但新增文字 y 重心偏上 4.1px（747 vs 期望 751）--垂直未对齐；task002：全页一致率 99.92%，原文完全一致，但新增文字笔画密度是期望 2 倍（1023 vs 514 暗像素）--字体识别错误（Songti SC NCC 0.355 存疑仍采用）；两个问题均为 skill 能力缺口（无基线对齐工具、字体识别无法处理未安装场景）；详见 [[PLN-003]]；见 [[TST-018]] [[BUG-053]] |
+| CHK-028 | 检查 | 原始成功项目（20260630-P图增加实习律师）与当前 skill 版本全面对比审查：分析 SVG 工作流程图、处理方案记录 MD、重构脚本、处理过程、原始文件 5 项资源，与当前脚本逐文件 diff | 2026-08-07 22:00 | 2026-08-07 22:30 | 已完成 | 结论：核心融合数学（render_scan_fusion + render_halo）完全一致；当前版本是原始的严格超集（scan_text_fusion 482->622 行、identify_font 183->320 行、identify_size 87->153 行）；新增 5 个工具（align_text/--preview-ink/密度验证/scan_edit_utils/verify_outputs）+ 修复全部 53 个 Bug；原始项目的 --reference-box 覆盖 --ink-color 坑已修复（BUG-053）；剩余差距为环境（macOS 缺仿宋字体，NCC 0.355 vs 0.816）和流程（未做 fusion/halo 迭代微调），非代码问题；源 PDF MD5 验证一致；见 [[TST-019]] [[PLN-003]] |
+| CHK-029 | 检查 | 未提交改动全量复核（19 文件 +317/-3136）：逐 diff 核对 + run_checks.sh 全量回归 + 安装目录 diff，登记 [[BUG-054]]～[[BUG-057]] | 2026-08-07 21:09 | 2026-08-07 21:09 | 已完成 | 代码本身健康：ruff 全清、178 passed、BUG-052/053 与 PLN-003 实现质量好；问题集中在文档与同步：根 README evals 残留 8 处、skill README pytest 路径错、两处安装目录滞后（缺 align_text/check_fonts）、SKILL.md 579 行超 500 约束；另 task-list DEV-007 备注 check_fonts.py「210 行」实为 298 行（小误差未单独立项）；代码未修，待用户决定 |
+| CHK-030 | 检查 | 修复 [[BUG-054]]～[[BUG-057]] 并全量回归验证：根 README 清除 evals/docs 残留、skill README 路径修正、SKILL.md 工具参考下沉 references/scripts_reference.md、两处安装目录 rsync 同步 | 2026-08-07 21:18 | 2026-08-07 21:18 | 已完成 | 4 项全部修复：根 README 0 残留（grep 验证）；skill README ../../../ 正确；SKILL.md 579→461 行 <500；两处安装目录 diff -rq 与源完全一致；run_checks.sh ✅（ruff 全清 + 178 passed，5 警告为既有 PyMuPDF SWIG 弃用）；DEV-007 check_fonts.py 行数误差 210→298 已纠正 |
+| CHK-030b | 检查 | 评估 design/plans 两份文档（原始项目对比分析 / 测试问题分析和复盘）：事实核查行数表、BUG 归属、阈值与 CLI 设计稿、引用实物、TST-019 时效 | 2026-08-07 21:09 | 2026-08-07 21:09 | 已完成 | 原误标为重复 CHK-030；结论：两文档结构/口径/诚实度均优，核心结论与独立核查一致；问题：对比分析行数表半数不准、~/Library/Fonts 误归 BUG-044；复盘设计稿与实现有漂移；文档未改，待用户决定 |
+| CHK-031 | 检查 | 第七轮全项目 bug 复查：178 单测全绿后，Bugbot + 并行代码审查 + 亲自复现；确认 BUG-054～057 已关闭；登记 [[BUG-058]]～[[BUG-062]]（旋转回归最重） | 2026-08-07 21:14 | 2026-08-07 21:14 | 已完成 | 基线 178 passed；Rotate=270 回渲 vs embedded MAE≈71 已复现；find_font Song→simfang、filter 尾逗号、fusion nan→全黑 已复现；代码未修，待用户决定 |
+| CHK-032 | 检查 | 修复 [[BUG-058]]～[[BUG-062]] 并全量回归验证：旋转双重旋转根因深挖 + find_font token 化 + fusion 数值校验 + 框越界校验 + filter 空串过滤 | 2026-08-07 21:56 | 2026-08-07 21:56 | 已完成 | 5 项全部修复。BUG-058 根因：PDFium FPDF_GetPageWidthF 已返回旋转后尺寸，render 内部已应用 /Rotate，rotation 参数是附加旋转；真实 Rotate=270 扫描件验证修复后 pypdfium2 与 fitz MAE=3.6（方向一致）。run_checks.sh ✅：ruff 全清 + 195 passed（178+17 新）；两处安装目录 rsync 同步 diff -rq 一致；旧 BUG-044 源码字符串断言已更新为行为断言 |
+| CHK-033 | 检查 | 独立复核 [[BUG-058]]～[[BUG-062]]：源码对照 + 行为探针复现 + TestBugFix058_062 | 2026-08-07 22:25 | 2026-08-07 22:25 | 已完成 | 5 项源码修复均在位；独立探针 9/9 PASS（rotation=0、Song≠仿宋、nan/neg/inf→rc2、越界 SystemExit、filter 尾逗号行数一致）；TestBugFix058_062 17/17 passed；ruff 全清。说明：Cursor 沙箱下全量会因 test_cli_source_dir_copies_font 写 ~/Library/Fonts 失败（单独 unrestricted 通过），与 058-062 无关 |
 
 ## 测试数据
 
@@ -126,6 +146,10 @@
 | TST-014 | 开发 | TestBugFix033_035 + 测试收紧：倒置/零高 move(4)+parse_ordered_pair(2)+destination 点坐标(1)+evals contrast 合约(1)+dpi≤0(2)+单图空 rect 文档化(1)；BUG-027 非注释命令锁；BUG-028 ArgumentTypeError | 2026-08-06 12:41 | 2026-08-06 12:44 | 已完成 | 106 passed（95 原+约 11 新/收紧）；见 [[BUG-033]]..[[BUG-035]] [[CHK-021]] |
 | TST-015 | 开发 | TestBugFix036_047 新增 34 项回归测试：BUG-036 xref去重(1)+BUG-037 负坐标(3)+BUG-038 x越界(4)+BUG-039 越界verify(4)+BUG-040 donor/ref越界(3)+BUG-041 尺寸/异常(2)+BUG-042 源码锁(1)+BUG-043 单候选(1)+BUG-044 大小写(1)+BUG-045 halo退化(1)+BUG-046 feather/median/pdfium/CLI(11)+BUG-047 trigger description(2)；并修正 BUG-013 歧义测试改用不同图 | 2026-08-07 11:00 | 2026-08-07 11:20 | 已完成 | 140 passed（106 原+34 新）；ruff 全清；run_checks.sh ✅；evals 17/17；见 [[BUG-036]]..[[BUG-047]] [[CHK-023]] |
 | TST-016 | 开发 | TestBugFix048_051 新增 19 项回归测试：BUG-048 replace_pdf_image try/finally源码锁+负页码+越界页码+合法页码(4)+BUG-049 pymupdf try/finally源码锁+越界页码+合法页码(3)+BUG-050 parse_ref缺等号/坐标个数/负坐标/倒置框/合法值/CLI无traceback(6)+BUG-051 validate_box负坐标/倒置框/合法值/sample-only CLI/reference-box CLI/crop-box CLI(6) | 2026-08-07 12:30 | 2026-08-07 12:45 | 已完成 | 159 passed（140 原+19 新）；ruff 全清；run_checks.sh ✅；evals 17/17；见 [[BUG-048]]..[[BUG-051]] [[CHK-025]] |
+| TST-017 | 开发 | tests/测试任务/basic-test-readme.md：task001/task002 集成测试说明（在「田甜」后加「（实习律师）」，保持字体字号扫描效果一致） | 2026-08-07 19:35 | 2026-08-07 19:35 | 已完成 | 描述模式 D 完整操作步骤（渲染->字体->字号->取样->融合->微调->封装）；两任务须各自独立识别字体 |
+| TST-018 | 开发 | 端到端测试 task001/task002：调用 skill 完整流程（渲染->OCR定位->字体->字号->取样->融合->封装）在「田甜」后加「（实习律师）」；用户替换 task001 PDF 后重跑；并与期望效果对比 | 2026-08-07 19:27 | 2026-08-07 21:00 | 已完成 | task001: Hiragino Sans GB W6 30px，差异 0.6✅；task002: Songti SC 28px，差异 3.6✅；PDF 打包用 fitz page.replace_image（task001 需旋转图片回 landscape）；发现 [[BUG-052]] [[BUG-053]]。期望效果对比（[[CHK-027]]）：task001 全页一致率 99.90%，新增文字墨色差 1.6（评分 A）；task002 全页一致率 99.92%，新增文字墨色差 8.1、暗像素多 99%（评分 B-，ink-color 调过头偏浓） |
+| TST-019 | 开发 | 改进后 skill 端到端复测 task001/task002：使用 align_text.py + --preview-ink + 密度交叉验证 + BUG-052/053 修复后的完整流程重跑 | 2026-08-07 20:30 | 2026-08-07 20:45 | 已完成 | task001（0003）: 墨迹均值差 0.6->0.1（83%提升），一次通过，全页一致率 99.89%；task002（0004）: 墨迹均值差 3.6->0.8（78%提升），迭代 3->0（BUG-053 修复后一次通过），全页一致率 99.89%，y重心差 1.9px；密度交叉验证检测到 task002 密度比 2.11x（仿宋未安装，已知限制）；见 [[PLN-003]] [[TST-018]] [[BUG-052]] [[BUG-053]] |
+| TST-020 | 开发 | TestBugFix058_062 新增 17 项回归测试：BUG-058 旋转源码锁+Rotate270内容朝向+Rotate90内容朝向(3)+BUG-059 Song不匹配FangSong+token精确+_name_tokens辅助(3)+BUG-060 nan/负数/inf CLI(3)+BUG-061 validate_box越界/界内/可选/crop CLI/align parse_box(5)+BUG-062 check_all语义+CLI尾逗号+纯逗号(3) | 2026-08-07 21:56 | 2026-08-07 21:56 | 已完成 | 195 passed（178 原+17 新）；ruff 全清；run_checks.sh ✅；旧 BUG-044 源码字符串断言更新为行为断言；见 [[BUG-058]]..[[BUG-062]] [[CHK-032]] |
 
 ## 文档维护
 
@@ -143,6 +167,8 @@
 | DOC-010 | 文档 | 版本升至 V0.1.1：新增 VERSION/CHANGELOG；同步根 README、skill README、SKILL.md（坐标有序、page-size/dpi/feather、package 参数表）、evals/README；CLI help 对齐 | 2026-08-06 12:45 | 2026-08-06 12:48 | 已完成 | 全称 V0.1.1-Build0178-20260806；SKILL.md 468 行仍 &lt;500；106 passed / run_checks ✅ |
 | DOC-011 | 文档 | 版本升至 V0.1.2：VERSION/CHANGELOG 记录 BUG-036～051；同步根 README、skill README、SKILL.md、evals/README、pipeline_methodology（非负坐标、move x、donor 框、feather≤2、单候选字体、page-index、trigger keywords 等） | 2026-08-07 11:17 | 2026-08-07 11:22 | 已完成 | 全称曾用 V0.1.2-Build0179-20260807；后由 [[DOC-012]] 将 VERSION 收为仅 V0.1.2；SKILL.md 471 行 &lt;500；159 passed |
 | DOC-012 | 文档 | VERSION 约定改为只记版本号（`V0.1.2`），不再含 Build/日期；同步 CHANGELOG 格式说明与根 README 结构注释 | 2026-08-07 11:30 | 2026-08-07 11:30 | 已完成 | Build/日期仅保留在 CHANGELOG 发布条目标题 |
+| DOC-013 | 文档 | 端到端测试问题分析与复盘文档：记录 task001 垂直未对齐、task002 字体识别错误等 5 个问题，提出 5 项 skill 改进方案及实施细节 | 2026-08-07 21:00 | 2026-08-07 21:30 | 已完成 | 文件 design/plans/测试问题分析和复盘-2608.md；含问题数据、根因分析、改进方案、优先级排序；见 [[PLN-003]] [[CHK-027]] |
+| DOC-014 | 文档 | 修订复盘文档：同步 BUG-052/053 与改进 1～5 落地状态；统一 vs 原文/期望口径；补充评分标准、验收标准、问题 6 封装朝向；2c 标远期 Spike；保留原方案细节不删减 | 2026-08-07 20:27 | 2026-08-07 20:30 | 已完成 | 同文件 design/plans/测试问题分析和复盘-2608.md；见 [[DOC-013]] [[PLN-003]] |
 
 ## 功能开发
 
@@ -154,6 +180,7 @@
 | DEV-004 | 开发 | identify_font.py + identify_size.py 字体字号识别（灰度 NCC + 墨迹共识 + 置信度门） | 2026-08-05 19:21 | 2026-08-05 19:21 | 已完成 | 从增加项目迁移并整合 |
 | DEV-005 | 开发 | font_registry.py 字体注册表与跨平台中文字体查找 | 2026-08-05 19:21 | 2026-08-05 19:21 | 已完成 | 支持 Windows/macOS/Linux 自动选择 |
 | DEV-006 | 开发 | verify_outputs.py 验证脚本：严格哈希 + --reproduce 内存复现模式 | 2026-08-05 19:21 | 2026-08-05 19:21 | 已完成 | 容差：≤10000px / 通道差≤4 / MAE≤0.001 |
+| DEV-007 | 开发 | check_fonts.py 字体环境检查与安装引导脚本：检查全部注册 CJK 字体安装状态，对缺失字体提供平台特定安装方法（Windows 字体来源说明 + 开源替代 Homebrew/apt 命令），支持 --source-dir 从挂载的 Windows 分区自动复制字体文件 | 2026-08-07 22:30 | 2026-08-07 23:00 | 已完成 | 新增 scripts/check_fonts.py（298 行）；SKILL.md 增加第 1.5 步「检查字体环境」+ check_fonts.py 工具参考节；README.md 文件结构表同步；9 项单元测试 TestCheckFonts；178 passed / ruff 全清 / run_checks.sh ✅；见 [[CHK-028]] |
 
 ## 配置运维
 
@@ -164,6 +191,9 @@
 | OPS-003 | 运维 | .gitignore 增补 Agent 安装目录忽略：.agents/、.claude/、.zcode/ | 2026-08-06 11:09 | 2026-08-06 11:09 | 已完成 | 源码目录 skills/ 不受影响；git check-ignore 验证三条规则生效；见 [[CHK-016]] |
 | OPS-004 | 运维 | run_checks.sh ruff 漏查 evals/（与 [[BUG-027]] 同因） | 2026-08-06 11:45 | 2026-08-06 11:47 | 已关闭 | 并入 [[BUG-027]] 跟踪，避免重复；修复时改 run_checks.sh 即可 |
 | OPS-005 | 运维 | .gitignore 增补项目运行时产物：scan_text_fusion_out/（默认输出目录）、*.tmp.pdf（replace_pdf_image 异常残留）、tmp/ 与 tasks/（用户任务工作目录） | 2026-08-07 13:00 | 2026-08-07 13:00 | 已完成 | git check-ignore 验证四条规则生效；无已跟踪源文件受影响；见 [[CHK-016]] |
+| OPS-006 | 运维 | .gitignore 增补 tests/测试任务/ 忽略规则（大体积测试 PDF 固件，非源码） | 2026-08-07 19:30 | 2026-08-07 19:30 | 已完成 | git check-ignore 验证规则生效；见 [[CHK-016]] [[OPS-005]] |
+| OPS-007 | 运维 | .gitignore 增补 tests/results/ 忽略规则；CLAUDE.md 增加端到端测试结果目录说明（文件名格式 yyyymmdd-xxxx-测试事由） | 2026-08-07 19:40 | 2026-08-07 19:40 | 已完成 | git check-ignore 验证规则生效；CLAUDE.md 新增「端到端测试结果目录」节 |
+| OPS-008 | 运维 | .gitignore 增补 tests/期望效果/ 忽略规则 | 2026-08-07 19:50 | 2026-08-07 19:50 | 已完成 | git check-ignore 验证规则生效；见 [[CHK-016]] [[OPS-005]] |
 
 ## 规划事项
 
@@ -171,6 +201,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | PLN-001 | 规划 | 统一 skill 架构设计：四种操作模式（删除/移动/替换/增加）+ 共用工具层 + 验证层 | 2026-08-05 19:21 | 2026-08-05 19:21 | 已完成 | DPI 选择：300 for remove/move/replace，200 for add/fusion；Route A 原生像素迁移 vs Route B 字体合成 |
 | PLN-002 | 规划 | 替换优先级链设计：同页词块→同系列页→相同单字→字体合成（含字重肩部） | 2026-08-05 19:21 | 2026-08-05 19:21 | 已完成 | 优先迁移原生扫描像素，字体合成仅作后备 |
+| PLN-003 | 规划 | 端到端测试问题分析与改进方案设计：task001 垂直未对齐、task002 字体识别错误、墨色调参困难、字号连锁失效、PDF 旋转 bug | 2026-08-07 21:00 | 2026-08-07 22:00 | 已完成 | 全部 5 项已实现：①align_text.py 新工具（墨迹垂直重心对齐）②identify_font.py 增加 glyph_fingerprint/rendered_fingerprint 密度交叉验证 ③BUG-053 修复 + --preview-ink 诊断模式 ④SKILL.md 工具链联动警告 ⑤BUG-052 修复；169 测试全通过；详见 design/plans/测试问题分析和复盘-2608.md；见 [[CHK-027]] [[TST-018]] [[BUG-052]] [[BUG-053]] |
 
 ## 优化事项
 
@@ -191,14 +222,14 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 51 | 51 | 0 | 100% |
-| 调整事项 | 6 | 6 | 0 | 100% |
-| 检查事项 | 26 | 26 | 0 | 100% |
-| 测试数据 | 16 | 16 | 0 | 100% |
-| 文档维护 | 12 | 12 | 0 | 100% |
-| 功能开发 | 6 | 6 | 0 | 100% |
-| 配置运维 | 5 | 5 | 0 | 100% |
-| 规划事项 | 2 | 2 | 0 | 100% |
+| 代码 Bug | 62 | 62 | 0 | 100% |
+| 调整事项 | 8 | 8 | 0 | 100% |
+| 检查事项 | 33 | 33 | 0 | 100% |
+| 测试数据 | 20 | 20 | 0 | 100% |
+| 文档维护 | 14 | 14 | 0 | 100% |
+| 功能开发 | 7 | 7 | 0 | 100% |
+| 配置运维 | 8 | 8 | 0 | 100% |
+| 规划事项 | 3 | 3 | 0 | 100% |
 | 优化事项 | 3 | 3 | 0 | 100% |
 | 调研事项 | 2 | 2 | 0 | 100% |
-| **总计** | 127 | 127 | 0 | 100% |
+| **总计** | 160 | 160 | 0 | 100% |

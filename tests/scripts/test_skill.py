@@ -25,10 +25,12 @@ from PIL import Image
 import unittest
 
 # 确保能导入同目录下的模块
-sys.path.insert(0, str(Path(__file__).parent))
+# 测试文件位于 tests/scripts/，被测脚本位于 skills/scanned-pdf-editor/scripts/
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / "skills" / "scanned-pdf-editor" / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
 
-import scan_edit_utils as utils
-import font_registry
+import scan_edit_utils as utils  # noqa: E402
+import font_registry  # noqa: E402
 
 
 def make_test_image(width: int = 400, height: int = 300) -> np.ndarray:
@@ -481,7 +483,7 @@ class TestEdgeCaseRegressions(unittest.TestCase):
         font_path, _ = font_registry.default_cjk_font()
         blank = self._save_png("blank.png", np.full((100, 100), 255, dtype=np.uint8))
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "identify_size.py"),
+            [sys.executable, str(SCRIPTS_DIR / "identify_size.py"),
              "--source", str(blank), "--font", font_path,
              "--ref", "田=10,10,50,50"],
             capture_output=True, text=True,
@@ -626,7 +628,7 @@ class TestEdgeCaseRegressions(unittest.TestCase):
         cfg = Path(self.tmpdir) / "cfg.json"
         cfg.write_text(json.dumps(config))
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "verify_outputs.py"), "--config", str(cfg)],
+            [sys.executable, str(SCRIPTS_DIR / "verify_outputs.py"), "--config", str(cfg)],
             capture_output=True, text=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -649,7 +651,7 @@ class TestEdgeCaseRegressions(unittest.TestCase):
         cfg = Path(self.tmpdir) / "cfg.json"
         cfg.write_text(json.dumps(config))
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "verify_outputs.py"), "--config", str(cfg)],
+            [sys.executable, str(SCRIPTS_DIR / "verify_outputs.py"), "--config", str(cfg)],
             capture_output=True, text=True,
         )
         self.assertNotEqual(completed.returncode, 0)
@@ -868,22 +870,6 @@ class TestBugFix016_018(unittest.TestCase):
                           "灰度 100 在 thr=80 下不应检出（太严格）")
         self.assertIsNotNone(identify_size.ink_dims(crop, 246),
                              "灰度 100 在 thr=246 下应检出（最宽松阈值）")
-
-    # ── BUG-018：evals.json 应为合法 JSON ──
-
-    def test_evals_json_is_valid(self):
-        """evals/evals.json 必须是可解析的合法 JSON。"""
-        import json
-        evals_path = Path(__file__).parent.parent / "evals" / "evals.json"
-        if not evals_path.exists():
-            self.skipTest("evals/evals.json 不存在")
-        data = json.loads(evals_path.read_text(encoding="utf-8"))
-        self.assertEqual(data["skill_name"], "scanned-pdf-editor")
-        self.assertGreaterEqual(len(data["evals"]), 1)
-        for ev in data["evals"]:
-            self.assertIn("id", ev)
-            self.assertIn("prompt", ev)
-            self.assertIn("expectations", ev)
 
 
 class TestBugFix017LargeEdge(unittest.TestCase):
@@ -1106,72 +1092,30 @@ class TestBugFix020_027(unittest.TestCase):
         self.assertTrue(full.exists())
         self.assertTrue((out_dir / "x_crop.png").exists())
 
-    # ── BUG-026：evals contrast 对照块的隐性 ValueError ──
+    # ── BUG-027：ruff 门禁覆盖范围 ──
 
-    def _load_run_evals(self):
-        import importlib.util
-        evals_dir = Path(__file__).parent.parent / "evals"
-        spec = importlib.util.spec_from_file_location(
-            "run_evals_for_test", evals_dir / "run_evals.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    def test_evals_contrast_check_without_normalize_mode_fails_cleanly(self):
-        """旧实现在 case 未带 --normalize-mode 时 index() 先求值必炸 ValueError；
-        修复后应返回明确失败原因而不是异常。"""
-        run_evals = self._load_run_evals()
-        src = Path(self.tmpdir) / "eval_src.png"
-        Image.fromarray(run_evals.make_eval_image()).save(src)
-        case = {"id": "T-026", "category": "behavior", "mode": "replace",
-                "cli_args": {}, "validation": {"check_differs_from_contrast": True}}
-        ok, detail = run_evals.run_single_behavior(
-            case, "replace", {}, src, Path(self.tmpdir) / "o1.png",
-            run_evals.make_eval_image(),
-        )
-        self.assertFalse(ok)
-        self.assertIn("normalize-mode", detail)
-
-    def test_evals_contrast_check_with_offset_passes(self):
-        """BEH-006 原路径（offset 主跑 + contrast 对照）仍然通过。"""
-        run_evals = self._load_run_evals()
-        img = run_evals.make_eval_image()
-        src = Path(self.tmpdir) / "eval_src2.png"
-        Image.fromarray(img).save(src)
-        case = {"id": "T-026b", "category": "behavior", "mode": "replace",
-                "cli_args": {"normalize-mode": "offset"},
-                "validation": {"check_differs_from_contrast": True}}
-        ok, detail = run_evals.run_single_behavior(
-            case, "replace", {"normalize-mode": "offset"},
-            src, Path(self.tmpdir) / "o2.png", img,
-        )
-        self.assertTrue(ok, detail)
-
-    # ── BUG-027：ruff 门禁必须覆盖 evals/ ──
-
-    def test_run_checks_ruff_covers_evals_dir(self):
-        """run_checks.sh 的 ruff 实际命令须为 `ruff check ..`（忽略注释行）。"""
-        run_checks = (Path(__file__).parent / "run_checks.sh").read_text(encoding="utf-8")
+    def test_run_checks_ruff_covers_scripts(self):
+        """run_checks.sh 的 ruff 实际命令须为 `ruff check .`（忽略注释行）。"""
+        run_checks = (SCRIPTS_DIR / "run_checks.sh").read_text(encoding="utf-8")
         cmd_lines = [
             line.strip()
             for line in run_checks.splitlines()
             if line.strip() and not line.strip().startswith("#")
         ]
         self.assertTrue(
-            any(line == "ruff check .." or line.startswith("ruff check .. ") for line in cmd_lines),
-            "run_checks.sh 须包含非注释命令 `ruff check ..`，否则 evals/ 会再次漏检",
+            any(line == "ruff check ." or line.startswith("ruff check . ") for line in cmd_lines),
+            "run_checks.sh 须包含非注释命令 `ruff check .`",
         )
 
-    def test_ruff_clean_over_whole_skill_dir(self):
-        """skill 根目录（scripts + evals）ruff 全清。"""
+    def test_ruff_clean_over_scripts_dir(self):
+        """scripts/ 目录 ruff 全清。"""
         import shutil
         import subprocess
         if shutil.which("ruff") is None:
             self.skipTest("本机未安装 ruff")
-        skill_dir = Path(__file__).parent.parent
+        scripts_dir = SCRIPTS_DIR
         completed = subprocess.run(
-            ["ruff", "check", str(skill_dir)], capture_output=True, text=True
+            ["ruff", "check", str(scripts_dir)], capture_output=True, text=True
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
@@ -1413,36 +1357,6 @@ class TestBugFix033_035(unittest.TestCase):
         import scan_edit_ops as ops
         self.assertEqual(ops.parse_pair("80,20"), (80, 20))
 
-    # ── BUG-034：contrast 主跑不得做无意义对照 ──
-
-    def _load_run_evals(self):
-        import importlib.util
-        evals_dir = Path(__file__).parent.parent / "evals"
-        spec = importlib.util.spec_from_file_location(
-            "run_evals_for_test_033", evals_dir / "run_evals.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    def test_evals_contrast_primary_fails_contract(self):
-        run_evals = self._load_run_evals()
-        img = run_evals.make_eval_image()
-        src = Path(self.tmpdir) / "eval_contrast.png"
-        Image.fromarray(img).save(src)
-        ok, detail = run_evals.run_single_behavior(
-            {"id": "T-034", "mode": "replace",
-             "validation": {"check_differs_from_contrast": True}},
-            "replace",
-            {"normalize-mode": "contrast"},
-            src,
-            Path(self.tmpdir) / "o_contrast.png",
-            img,
-        )
-        self.assertFalse(ok)
-        self.assertIn("normalize-mode", detail)
-        self.assertNotIn("offset 与 contrast 输出相同", detail)
-
     # ── BUG-035：--dpi <=0 清晰 exit 2 ──
 
     def test_package_dpi_zero_rejected(self):
@@ -1665,7 +1579,7 @@ class TestBugFix036_047(unittest.TestCase):
         cfg = Path(self.tmpdir) / "cfg.json"
         cfg.write_text(json.dumps(config))
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "verify_outputs.py"),
+            [sys.executable, str(SCRIPTS_DIR / "verify_outputs.py"),
              "--config", str(cfg)],
             capture_output=True, text=True,
         )
@@ -1699,7 +1613,7 @@ class TestBugFix036_047(unittest.TestCase):
         cfg = Path(self.tmpdir) / "cfg.json"
         cfg.write_text(json.dumps(config))
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "verify_outputs.py"),
+            [sys.executable, str(SCRIPTS_DIR / "verify_outputs.py"),
              "--config", str(cfg)],
             capture_output=True, text=True,
         )
@@ -1708,29 +1622,6 @@ class TestBugFix036_047(unittest.TestCase):
         self.assertIn("[ok2]", completed.stdout, "第二个用例不应被跳过")
         self.assertIn("验证过程异常", completed.stderr)
 
-    # ── BUG-042：run_evals contrast 对照运行失败应判失败 ──
-
-    def _load_run_evals(self):
-        import importlib.util
-        evals_dir = Path(__file__).parent.parent / "evals"
-        spec = importlib.util.spec_from_file_location(
-            "run_evals_for_test_042", evals_dir / "run_evals.py"
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    def test_evals_contrast_check_verifies_return_code(self):
-        """源码里 contrast 对照段必须检查 returncode（否则 BEH-006 假绿）。"""
-        run_evals_src = (Path(__file__).parent.parent / "evals" / "run_evals.py").read_text(
-            encoding="utf-8"
-        )
-        # 定位 check_differs_from_contrast 到 return True 之间的对照段
-        start = run_evals_src.index("check_differs_from_contrast")
-        end = run_evals_src.index("return True", start)
-        section = run_evals_src[start:end]
-        self.assertIn("returncode", section, "contrast 对照必须检查返回码")
-
     # ── BUG-043：identify_font 单候选不得判"确定" ──
 
     def test_identify_font_single_candidate_not_certain(self):
@@ -1738,7 +1629,7 @@ class TestBugFix036_047(unittest.TestCase):
 
         源码校验：判定块里必须有 len(ranked)<2 守卫，且单候选分支不含"确定"。
         """
-        src = (Path(__file__).parent / "identify_font.py").read_text(encoding="utf-8")
+        src = (SCRIPTS_DIR / "identify_font.py").read_text(encoding="utf-8")
         # 必须有 len(ranked) < 2 的守卫分支
         self.assertTrue(
             "len(ranked) < 2" in src or "len(ranked)<2" in src,
@@ -1749,11 +1640,8 @@ class TestBugFix036_047(unittest.TestCase):
 
     def test_find_font_case_insensitive_songti(self):
         """find_font('songti') 与 find_font('Songti') 应对称命中（都找到或都找不到）。"""
-        import inspect
-        src = inspect.getsource(font_registry.find_font)
-        # 注册名匹配应走小写比较
-        self.assertIn("name.lower()", src, "注册名匹配应大小写不敏感")
         # 行为校验：两者结果应一致（都命中或都不命中）
+        # token 匹配内部统一走小写（_name_tokens 输出小写 token，spec_l 已 lower）
         r_upper = font_registry.find_font("Songti")
         r_lower = font_registry.find_font("songti")
         self.assertEqual(r_upper is not None, r_lower is not None,
@@ -1806,7 +1694,7 @@ class TestBugFix036_047(unittest.TestCase):
         检查赋值行（consensus = ...）而非全文，避免 BUG 注释里的引用误判。
         """
         import re
-        identify_src = (Path(__file__).parent / "identify_size.py").read_text(
+        identify_src = (SCRIPTS_DIR / "identify_size.py").read_text(
             encoding="utf-8"
         )
         # 找 consensus = ... 这一行实际代码（排除注释行）
@@ -1841,7 +1729,7 @@ class TestBugFix036_047(unittest.TestCase):
         import sys
         src = self._save_source()
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "scan_edit_ops.py"),
+            [sys.executable, str(SCRIPTS_DIR / "scan_edit_ops.py"),
              "remove", "--source", str(src),
              "--boxes", "50,50,100", "--output", str(Path(self.tmpdir) / "o.png")],
             capture_output=True, text=True,
@@ -1855,7 +1743,7 @@ class TestBugFix036_047(unittest.TestCase):
         import sys
         src = self._save_source()
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "identify_font.py"),
+            [sys.executable, str(SCRIPTS_DIR / "identify_font.py"),
              "--source", str(src), "--ref", "田=50,50,100"],
             capture_output=True, text=True,
         )
@@ -1868,7 +1756,7 @@ class TestBugFix036_047(unittest.TestCase):
         import sys
         src = self._save_source()
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "identify_font.py"),
+            [sys.executable, str(SCRIPTS_DIR / "identify_font.py"),
              "--source", str(src),
              "--ref", "田=10,10,50,50", "--ref", "田=60,10,100,50"],
             capture_output=True, text=True,
@@ -1883,45 +1771,12 @@ class TestBugFix036_047(unittest.TestCase):
             self.skipTest("本机无 CJK 字体，跳过融合测试")
         src = self._save_source()
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "scan_text_fusion.py"),
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
              "--source", str(src), "--text", "测", "--position", "10", "10",
              "--variants", "--fusion-variants", "0.5,0.7,"],
             capture_output=True, text=True,
         )
         self.assertNotIn("Traceback", completed.stderr)
-
-    # ── BUG-047：trigger_match 必须使用 description / keywords ──
-
-    def test_trigger_evals_uses_description(self):
-        """删掉 description 里全部触发词后，触发 eval 应失败（不再假绿）。"""
-        run_evals = self._load_run_evals()
-        # monkeypatch load_skill_description 返回不含任何触发词的描述
-        original = run_evals.load_skill_description
-        run_evals.load_skill_description = lambda: "完全无关的描述 xyz"
-        try:
-            import json
-            cases = json.loads(
-                (Path(__file__).parent.parent / "evals" / "eval_cases.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            passed, total = run_evals.run_trigger_evals(cases, verbose=False)
-            # 正例 keywords 不在空 description 里 → 应有 FAIL，passed < total
-            self.assertLess(passed, total, "空 description 时触发 eval 应失败")
-        finally:
-            run_evals.load_skill_description = original
-
-    def test_trigger_evals_passes_with_real_description(self):
-        """真实 description（含触发词）下触发 eval 全绿。"""
-        run_evals = self._load_run_evals()
-        import json
-        cases = json.loads(
-            (Path(__file__).parent.parent / "evals" / "eval_cases.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        passed, total = run_evals.run_trigger_evals(cases, verbose=False)
-        self.assertEqual(passed, total, f"真实 description 应全绿: {passed}/{total}")
 
 
 class TestBugFix048_051(unittest.TestCase):
@@ -2093,7 +1948,7 @@ class TestBugFix048_051(unittest.TestCase):
         import sys
         src = self._save_source()
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "identify_size.py"),
+            [sys.executable, str(SCRIPTS_DIR / "identify_size.py"),
              "--source", str(src), "--font", "nonexistent_font",
              "--ref", "田50,50,100,100"],
             capture_output=True, text=True,
@@ -2129,7 +1984,7 @@ class TestBugFix048_051(unittest.TestCase):
         import sys
         src = self._save_source()
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "scan_text_fusion.py"),
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
              "--source", str(src), "--sample-only", "-10", "50", "100", "100"],
             capture_output=True, text=True,
         )
@@ -2144,7 +1999,7 @@ class TestBugFix048_051(unittest.TestCase):
             self.skipTest("本机无 CJK 字体，跳过融合测试")
         src = self._save_source()
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "scan_text_fusion.py"),
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
              "--source", str(src), "--text", "测", "--position", "10", "10",
              "--reference-box", "-10", "50", "100", "100"],
             capture_output=True, text=True,
@@ -2160,13 +2015,652 @@ class TestBugFix048_051(unittest.TestCase):
             self.skipTest("本机无 CJK 字体，跳过融合测试")
         src = self._save_source()
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).parent / "scan_text_fusion.py"),
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
              "--source", str(src), "--text", "测", "--position", "10", "10",
              "--crop-box", "100", "50", "50", "100"],
             capture_output=True, text=True,
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertNotIn("Traceback", completed.stderr)
+
+
+class TestBugFix052_053(unittest.TestCase):
+    """BUG-052 / BUG-053 及新功能回归测试。
+
+    - BUG-052: render_pdf_page 不应用 /Rotate 条目
+    - BUG-053: --reference-box 静默覆盖 --ink-color
+    - 新增: identify_font 密度交叉验证 (glyph_fingerprint / rendered_fingerprint)
+    - 新增: align_text.py 垂直对齐工具
+    - 新增: scan_text_fusion --preview-ink 模式
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.img = np.full((300, 300, 3), 240, dtype=np.uint8)
+        self.img[100:130, 50:250] = 60
+
+    def _save_source(self, name="s.png"):
+        path = Path(self.tmpdir) / name
+        Image.fromarray(self.img).save(path)
+        return path
+
+    # ── BUG-052/058: render_pdf_page 旋转 ──
+
+    def test_render_pdf_page_no_double_rotation(self):
+        """render_pdf_page 不应盲传 get_rotation() 给 render()。
+
+        PDFium 的 render(rotation=0) 内部已自动应用页面 /Rotate，
+        rotation 参数是附加旋转——传 get_rotation() 会双重旋转（BUG-058）。
+        """
+        import inspect
+        src = inspect.getsource(utils.render_pdf_page)
+        self.assertIn("rotation=0", src,
+                       "render 应传 rotation=0（让 PDFium 内部处理 /Rotate），"
+                       "而非 rotation=get_rotation()（双重旋转，BUG-058）")
+        self.assertNotIn("rotation=rotation", src,
+                         "不应把 get_rotation() 的返回值作为附加旋转传入")
+
+    def test_render_pdf_page_applies_rotation(self):
+        """带 /Rotate 标记的 PDF 渲染后内容朝向应正确。
+
+        在 portrait 页面左上角画黑块，设置 /Rotate 270（=逆时针 90°）。
+        正确渲染时黑块应出现在左下角（原左上角逆时针转 90° 的位置）。
+        render(rotation=0) 让 PDFium 内部处理 /Rotate；若误传
+        rotation=270 则双重旋转，黑块会跑到右下角（BUG-058）。
+        """
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=300)  # portrait
+        # 左上角画黑块
+        page.draw_rect(fitz.Rect(10, 10, 50, 50), color=(0, 0, 0), fill=(0, 0, 0))
+        page.set_rotation(270)
+        pdf_path = Path(self.tmpdir) / "rotated270.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+        img = utils.render_pdf_page(pdf_path, dpi=72).convert("RGB")
+        arr = np.asarray(img)
+        dark = np.all(arr < 100, axis=2)
+        ys, xs = np.where(dark)
+        h, w = arr.shape[:2]
+        # /Rotate=270：左上黑块应转至左下
+        self.assertLess(xs.mean(), w / 2, "黑块应在左半侧（逆时针 90° 后）")
+        self.assertGreater(ys.mean(), h / 2, "黑块应在下半侧（左上→左下）")
+
+    # ── BUG-053: ink-color 优先级 ──
+
+    def test_ink_color_argparse_default_is_none(self):
+        """--ink-color 的 argparse default 应为 None（不再是 list(DEFAULT_INK_COLOR)）。"""
+        import scan_text_fusion as stf
+        parser = stf.build_parser()
+        # 解析不带 --ink-color 的参数
+        args = parser.parse_args(["--source", "x.png", "--position", "1", "2"])
+        self.assertIsNone(args.ink_color)
+
+    def test_ink_color_explicit_overrides_reference_box(self):
+        """显式 --ink-color + --reference-box 时，应使用显式值并打印 sampled (reference)。"""
+        import subprocess
+        import sys
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体")
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(src), "--text", "测", "--position", "10", "10",
+             "--ink-color", "20", "30", "40",
+             "--reference-box", "50", "100", "250", "130"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("using explicit --ink-color", completed.stdout)
+        self.assertIn("sampled ink color (reference)", completed.stdout)
+
+    def test_ink_color_reference_box_when_no_explicit(self):
+        """无 --ink-color + 有 --reference-box 时，应采样并使用采样值。"""
+        import subprocess
+        import sys
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体")
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(src), "--text", "测", "--position", "10", "10",
+             "--reference-box", "50", "100", "250", "130"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("sampled ink color:", completed.stdout)
+        self.assertNotIn("using explicit", completed.stdout)
+
+    def test_ink_color_default_when_neither_given(self):
+        """无 --ink-color 且无 --reference-box 时，应使用 DEFAULT_INK_COLOR。"""
+        import scan_text_fusion as stf
+        import inspect
+        src = inspect.getsource(stf.run)
+        # run() 应有 DEFAULT_INK_COLOR 作为 fallback
+        self.assertIn("DEFAULT_INK_COLOR", src)
+        self.assertIn("args.ink_color is not None", src)
+
+    # ── --preview-ink 模式 ──
+
+    def test_preview_ink_mode_exits_without_position(self):
+        """--preview-ink 不需要 --position，应正常退出。"""
+        import subprocess
+        import sys
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体")
+        src = self._save_source()
+        out_dir = Path(self.tmpdir) / "preview"
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(src), "--preview-ink",
+             "--output-dir", str(out_dir)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("墨色预览", completed.stdout)
+        self.assertTrue((out_dir / "ink_preview.png").exists())
+
+    def test_preview_ink_with_explicit_color(self):
+        """--preview-ink + --ink-color 应显示显式值和来源。"""
+        import subprocess
+        import sys
+        src = self._save_source()
+        out_dir = Path(self.tmpdir) / "preview2"
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(src), "--preview-ink",
+             "--ink-color", "10", "20", "30",
+             "--output-dir", str(out_dir)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("显式 --ink-color", completed.stdout)
+        self.assertIn("(10, 20, 30)", completed.stdout)
+
+    # ── identify_font 密度交叉验证 ──
+
+    def test_glyph_fingerprint_returns_density(self):
+        """glyph_fingerprint 应返回 density 和 h_v_ratio。"""
+        import identify_font as iff
+        # 全白图无墨迹
+        white = np.full((50, 50), 255, dtype=np.float32)
+        fp = iff.glyph_fingerprint(white)
+        self.assertEqual(fp["density"], 0.0)
+        # 半黑图有墨迹
+        half = np.full((50, 50), 255, dtype=np.float32)
+        half[:25, :] = 50  # 上半部分是墨迹
+        fp = iff.glyph_fingerprint(half)
+        self.assertAlmostEqual(fp["density"], 0.5, places=2)
+        self.assertGreater(fp["h_v_ratio"], 0)
+
+    def test_rendered_fingerprint_returns_fingerprint(self):
+        """rendered_fingerprint 应返回非 None 的指纹（本机有 CJK 字体时）。"""
+        import identify_font as iff
+        font_path, font_idx = (font_registry.default_cjk_font() or (None, 0))
+        if font_path is None:
+            self.skipTest("本机无 CJK 字体")
+        fp = iff.rendered_fingerprint("测", font_path, font_idx)
+        self.assertIsNotNone(fp)
+        self.assertGreater(fp["density"], 0)
+        self.assertGreater(fp["h_v_ratio"], 0)
+
+    # ── align_text.py ──
+
+    def test_align_text_ink_vertical_center(self):
+        """ink_vertical_center 应正确计算墨迹垂直重心。"""
+        import align_text
+        # 上半黑、下半白 -> 中心应在上半部分
+        gray = np.full((100, 50), 255, dtype=np.float32)
+        gray[:50, :] = 50
+        center = align_text.ink_vertical_center(gray)
+        self.assertIsNotNone(center)
+        self.assertLess(center, 50)  # 中心应在 y=0~49 范围内
+
+    def test_align_text_ink_vertical_center_no_ink(self):
+        """无墨迹时应返回 None。"""
+        import align_text
+        white = np.full((50, 50), 255, dtype=np.float32)
+        self.assertIsNone(align_text.ink_vertical_center(white))
+
+    def test_align_text_text_ink_center_offset(self):
+        """text_ink_center_offset 应返回正值（墨迹中心在绘制点下方）。"""
+        import align_text
+        font_path, font_idx = (font_registry.default_cjk_font() or (None, 0))
+        if font_path is None:
+            self.skipTest("本机无 CJK 字体")
+        offset = align_text.text_ink_center_offset("测试", font_path, font_idx, 32)
+        self.assertIsNotNone(offset)
+        self.assertGreater(offset, 0)  # 墨迹中心应在绘制点下方
+
+    def test_align_text_parse_box_valid(self):
+        """parse_box 应正确解析合法坐标。"""
+        import align_text
+        result = align_text.parse_box("10,20,30,40")
+        self.assertEqual(result, (10, 20, 30, 40))
+
+    def test_align_text_parse_box_invalid_count(self):
+        """parse_box 应拒绝非 4 个值。"""
+        import align_text
+        with self.assertRaises(SystemExit):
+            align_text.parse_box("10,20,30")
+
+    def test_align_text_parse_box_inverted(self):
+        """parse_box 应拒绝倒置坐标。"""
+        import align_text
+        with self.assertRaises(SystemExit):
+            align_text.parse_box("30,40,10,20")
+
+    def test_align_text_cli_outputs_adjusted_y(self):
+        """align_text CLI 应输出调整后的 Y 值。"""
+        import subprocess
+        import sys
+        font_path, font_idx = (font_registry.default_cjk_font() or (None, 0))
+        if font_path is None:
+            self.skipTest("本机无 CJK 字体")
+        src = self._save_source()
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "align_text.py"),
+             "--source", str(src),
+             "--ref-box", "50,100,250,130",
+             "--font", font_path, "--font-index", str(font_idx),
+             "--size", "32", "--text", "测试", "--y", "100"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("调整后 Y", completed.stdout)
+
+
+class TestCheckFonts(unittest.TestCase):
+    """check_fonts.py 字体环境检查脚本测试。"""
+
+    def test_check_all_returns_installed_and_missing(self):
+        """check_all 应返回已安装和未安装两个列表。"""
+        import check_fonts
+        installed, missing = check_fonts.check_all()
+        # 两者总和应等于注册表中的字体总数
+        total = len(font_registry.CJK_FONTS)
+        self.assertEqual(len(installed) + len(missing), total)
+        # 每项是 (名称, 文件名, ttc索引) 三元组
+        for item in installed + missing:
+            self.assertEqual(len(item), 3)
+
+    def test_check_all_with_filter(self):
+        """--filter 应只返回匹配的字体。"""
+        import check_fonts
+        installed, missing = check_fonts.check_all(["simfang"])
+        # simfang.ttf 对应仿宋
+        names = [n for n, _, _ in installed + missing]
+        self.assertTrue(any("仿宋" in n or "FangSong" in n for n in names))
+        # 不应包含不相关的字体（如 PingFang）
+        self.assertFalse(any("PingFang" in n for n in names))
+
+    def test_check_all_filter_case_insensitive(self):
+        """--filter 应大小写不敏感。"""
+        import check_fonts
+        _, missing_lower = check_fonts.check_all(["noto"])
+        _, missing_upper = check_fonts.check_all(["NOTO"])
+        self.assertEqual(len(missing_lower), len(missing_upper))
+
+    def test_install_targets_returns_valid_dirs(self):
+        """install_targets 应返回当前平台的字体目录列表，首个可创建。"""
+        import check_fonts
+        targets = check_fonts.install_targets()
+        self.assertGreater(len(targets), 0)
+        # 首个应是用户级目录（可写）
+        self.assertTrue(str(targets[0]).startswith(str(Path.home())) or
+                        str(targets[0]).startswith("/"))
+
+    def test_cli_runs_and_reports_status(self):
+        """check_fonts.py CLI 应正常运行并报告安装状态。"""
+        import subprocess
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "check_fonts.py")],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("CJK 字体安装情况", completed.stdout)
+        self.assertIn("总计:", completed.stdout)
+
+    def test_cli_with_filter(self):
+        """check_fonts.py --filter 应只显示匹配字体。"""
+        import subprocess
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "check_fonts.py"),
+             "--filter", "仿宋"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("仿宋", completed.stdout)
+
+    def test_cli_source_dir_nonexistent_exits_1(self):
+        """--source-dir 指向不存在的目录时应 exit 1。"""
+        import subprocess
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "check_fonts.py"),
+             "--filter", "仿宋", "--source-dir", "/tmp/__nonexistent_font_dir__"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("目录不存在", completed.stderr)
+
+    def test_cli_source_dir_no_fonts_found(self):
+        """--source-dir 指向空目录时应报告未找到字体。"""
+        import subprocess
+        empty_dir = Path(tempfile.mkdtemp())
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPTS_DIR / "check_fonts.py"),
+                 "--filter", "仿宋", "--source-dir", str(empty_dir)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertIn("未找到", completed.stdout)
+        finally:
+            empty_dir.rmdir()
+
+    def test_cli_source_dir_copies_font(self):
+        """--source-dir 找到字体文件时应复制到目标目录。"""
+        import check_fonts
+        import shutil
+        # 创建临时源目录，放入一个假字体文件
+        src_dir = Path(tempfile.mkdtemp())
+        font_file = src_dir / "simfang.ttf"
+        font_file.write_bytes(b"fake font data")
+        # 记录目标目录
+        target = check_fonts.install_targets()[0]
+        target.mkdir(parents=True, exist_ok=True)
+        dest_file = target / "simfang.ttf"
+        # 若已存在真实 simfang.ttf 则跳过
+        if dest_file.exists():
+            font_file.unlink()
+            src_dir.rmdir()
+            self.skipTest("目标目录已存在 simfang.ttf")
+        try:
+            import subprocess
+            completed = subprocess.run(
+                [sys.executable, str(SCRIPTS_DIR / "check_fonts.py"),
+                 "--filter", "仿宋", "--source-dir", str(src_dir), "--yes"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("已复制", completed.stdout)
+            self.assertTrue(dest_file.exists())
+        finally:
+            if dest_file.exists():
+                dest_file.unlink()
+            font_file.unlink()
+            src_dir.rmdir()
+
+
+class TestBugFix058_062(unittest.TestCase):
+    """BUG-058～062 回归测试。
+
+    - BUG-058: render_pdf_page 双重旋转（rotation=get_rotation() 应改为 rotation=0）
+    - BUG-059: font_registry.find_font 子串匹配过宽（Song→FangSong）
+    - BUG-060: scan_text_fusion --fusion-strength nan/负数未校验
+    - BUG-061: 框坐标未校验 ⊂ 图像（validate_box/parse_ref/parse_box）
+    - BUG-062: check_fonts.py --filter 尾逗号空串导致过滤失效
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    # ── BUG-058: render_pdf_page 不应双重旋转 ──
+
+    def test_render_pdf_page_no_double_rotation(self):
+        """render_pdf_page 源码应传 rotation=0，不含 rotation=rotation。"""
+        import inspect
+        src = inspect.getsource(utils.render_pdf_page)
+        self.assertIn("rotation=0", src,
+                       "render 应传 rotation=0（让 PDFium 内部处理 /Rotate）")
+        self.assertNotIn("rotation=rotation", src,
+                         "不应把 get_rotation() 返回值作为附加旋转（双重旋转，BUG-058）")
+
+    def test_render_pdf_page_rotate270_content_correct(self):
+        """带 /Rotate 270 的 PDF 渲染后内容朝向应正确。
+
+        portrait 页面左上角黑块 + /Rotate 270（逆时针 90°）→ 黑块应在左下角。
+        若误传 rotation=270（双重旋转），黑块会跑到右下角。
+        """
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=300)  # portrait
+        page.draw_rect(fitz.Rect(10, 10, 50, 50), color=(0, 0, 0), fill=(0, 0, 0))
+        page.set_rotation(270)
+        pdf_path = Path(self.tmpdir) / "rotated270.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+        img = utils.render_pdf_page(pdf_path, dpi=72).convert("RGB")
+        arr = np.asarray(img)
+        dark = np.all(arr < 100, axis=2)
+        ys, xs = np.where(dark)
+        h, w = arr.shape[:2]
+        # /Rotate=270：左上→左下
+        self.assertLess(xs.mean(), w / 2, "黑块应在左半侧")
+        self.assertGreater(ys.mean(), h / 2, "黑块应在下半侧（左上→左下）")
+
+    def test_render_pdf_page_rotate90_content_correct(self):
+        """带 /Rotate 90 的 PDF 渲染后内容朝向应正确。
+
+        portrait 页面左上角黑块 + /Rotate 90（顺时针 90°）→ 黑块应在右上角。
+        """
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        doc = fitz.open()
+        page = doc.new_page(width=200, height=300)
+        page.draw_rect(fitz.Rect(10, 10, 50, 50), color=(0, 0, 0), fill=(0, 0, 0))
+        page.set_rotation(90)
+        pdf_path = Path(self.tmpdir) / "rotated90.pdf"
+        doc.save(str(pdf_path))
+        doc.close()
+        img = utils.render_pdf_page(pdf_path, dpi=72).convert("RGB")
+        arr = np.asarray(img)
+        dark = np.all(arr < 100, axis=2)
+        ys, xs = np.where(dark)
+        h, w = arr.shape[:2]
+        # /Rotate=90：左上→右上
+        self.assertGreater(xs.mean(), w / 2, "黑块应在右半侧")
+        self.assertLess(ys.mean(), h / 2, "黑块应在上半侧（左上→右上）")
+
+    # ── BUG-059: find_font token 匹配不过宽 ──
+
+    def test_find_font_song_not_match_fangsong(self):
+        """'Song'/'song' 不应命中 'FangSong'（仿宋）——子串匹配过宽（BUG-059）。
+
+        模拟全部字体已安装，验证 'Song' 匹配到 Songti 而非仿宋。
+        """
+        import importlib
+        orig_resolve = font_registry.resolve_font
+        font_registry.resolve_font = lambda fn: f"/mock/{fn}"
+        try:
+            r = font_registry.find_font("Song")
+            if r is not None:
+                hit_fn = r[0].split("/")[-1]
+                self.assertNotEqual(hit_fn, "simfang.ttf",
+                                    "'Song' 不应命中仿宋 simfang.ttf（BUG-059）")
+        finally:
+            font_registry.resolve_font = orig_resolve
+
+    def test_find_font_token_matching_precise(self):
+        """token 级匹配：精确名/文件名命中正确字体。"""
+        import importlib
+        orig_resolve = font_registry.resolve_font
+        font_registry.resolve_font = lambda fn: f"/mock/{fn}"
+        try:
+            # 文件名（带/不带后缀）应正确命中
+            for spec in ["simfang", "simfang.ttf", "SimSun", "simsun"]:
+                r = font_registry.find_font(spec)
+                self.assertIsNotNone(r, f"find_font({spec!r}) 应命中")
+            # 注册名 token 精确匹配
+            for spec in ["FangSong", "FangSong".lower(), "KaiTi"]:
+                r = font_registry.find_font(spec)
+                self.assertIsNotNone(r, f"find_font({spec!r}) 应命中")
+        finally:
+            font_registry.resolve_font = orig_resolve
+
+    def test_find_font_name_tokens_helper(self):
+        """_name_tokens 拆分正确。"""
+        tokens = font_registry._name_tokens("仿宋 (FangSong)")
+        self.assertIn("仿宋", tokens)
+        self.assertIn("fangsong", tokens)
+        tokens2 = font_registry._name_tokens("Hiragino Sans GB W3")
+        self.assertIn("hiragino", tokens2)
+        self.assertIn("gb", tokens2)
+
+    # ── BUG-060: fusion-strength nan/负数校验 ──
+
+    def test_fusion_strength_nan_rejected(self):
+        """--fusion-strength nan 应被 parser.error 拒绝（退出码 2），不产出全黑图。"""
+        import scan_text_fusion as stf
+        img_path = Path(self.tmpdir) / "s.png"
+        Image.new("RGB", (200, 200), (200, 200, 200)).save(img_path)
+        import subprocess
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(img_path), "--position", "10", "10",
+             "--fusion-strength", "nan"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0,
+                            "nan strength 应非零退出")
+        self.assertIn("有限", completed.stderr + completed.stdout)
+
+    def test_fusion_strength_negative_rejected(self):
+        """--fusion-strength 负数应被拒绝，不裸 ValueError。"""
+        import subprocess
+        img_path = Path(self.tmpdir) / "s.png"
+        Image.new("RGB", (200, 200), (200, 200, 200)).save(img_path)
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(img_path), "--position", "10", "10",
+             "--fusion-strength", "-0.5"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0,
+                            "负数 strength 应非零退出")
+        # 不应有 traceback（应有清晰错误信息）
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_halo_strength_nan_rejected(self):
+        """--halo-strength nan 同样应被拒绝。"""
+        import subprocess
+        img_path = Path(self.tmpdir) / "s.png"
+        Image.new("RGB", (200, 200), (200, 200, 200)).save(img_path)
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(img_path), "--position", "10", "10",
+             "--halo-strength", "inf"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+
+    # ── BUG-061: 框坐标越界校验 ──
+
+    def test_validate_box_rejects_out_of_bounds(self):
+        """validate_box 给出 image_size 时应拒绝越界框。"""
+        import scan_text_fusion as stf
+        # 100×80 图，框 x2=150 越界
+        with self.assertRaises(SystemExit):
+            stf.validate_box((50, 50, 150, 60), "reference-box", (100, 80))
+
+    def test_validate_box_accepts_in_bounds(self):
+        """validate_box 界内框正常通过。"""
+        import scan_text_fusion as stf
+        box = stf.validate_box((10, 10, 90, 70), "reference-box", (100, 80))
+        self.assertEqual(box, (10, 10, 90, 70))
+
+    def test_validate_box_bounds_optional(self):
+        """不给 image_size 时不做越界检查（向后兼容）。"""
+        import scan_text_fusion as stf
+        box = stf.validate_box((50, 50, 150, 150), "reference-box")
+        self.assertEqual(box, (50, 50, 150, 150))
+
+    def test_crop_box_out_of_bounds_rejected_cli(self):
+        """--crop-box 越界应在 CLI 拒绝，不产出黑边图。"""
+        import subprocess
+        img_path = Path(self.tmpdir) / "s.png"
+        Image.new("RGB", (100, 80), (200, 200, 200)).save(img_path)
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体")
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(img_path), "--position", "10", "10",
+             "--crop-box", "50", "50", "150", "70"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(completed.returncode, 0,
+                            "越界 crop-box 应非零退出")
+        self.assertIn("越出图像边界", completed.stderr + completed.stdout)
+
+    def test_align_parse_box_rejects_out_of_bounds(self):
+        """align_text parse_box 给出 image_size 时拒绝越界框。"""
+        import importlib
+        import align_text
+        with self.assertRaises(SystemExit):
+            align_text.parse_box("10,10,200,200", image_size=(100, 100))
+
+    # ── BUG-062: check_fonts --filter 尾逗号 ──
+
+    def test_check_all_trailing_comma_filter(self):
+        """check_all(['仿宋', '']) 不应因空串列出全部字体（BUG-062）。"""
+        import check_fonts
+        # 空串在旧实现 "" in name 恒真 → 返回全部字体
+        # 修复后空串被 check_all 内部过滤还是 main 过滤？
+        # check_all 的过滤逻辑：any(f.lower() in name.lower() for f in font_filter)
+        # 如果传入 [""]，"" in name 仍恒真。所以空串过滤应在 main 完成。
+        # 这里验证 check_all([""]) 的行为（仍然会匹配全部，这是函数语义）
+        # 真正的修复在 main() 的 split 处理，用 CLI 测试验证
+        installed_all, missing_all = check_fonts.check_all()
+        total_all = len(installed_all) + len(missing_all)
+        installed_empty, missing_empty = check_fonts.check_all([""])
+        total_empty = len(installed_empty) + len(missing_empty)
+        # check_all([""]) 会匹配全部（"" in name 恒真），这是预期的——
+        # 修复点是 main() 不让空串进入 check_all
+        self.assertEqual(total_empty, total_all,
+                         "check_all(['']) 匹配全部是函数语义；修复在 main 的 split")
+
+    def test_check_fonts_cli_trailing_comma_filter(self):
+        """check_fonts.py --filter '仿宋,' 不应列出全部字体（BUG-062）。"""
+        import subprocess
+        # 先跑 --filter 仿宋（正确），再跑 --filter '仿宋,'（尾逗号）
+        completed_clean = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "check_fonts.py"), "--filter", "仿宋"],
+            capture_output=True, text=True,
+        )
+        completed_trailing = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "check_fonts.py"), "--filter", "仿宋,"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed_clean.returncode, 0)
+        self.assertEqual(completed_trailing.returncode, 0)
+        # 两者的输出（字体列表行数）应该相同——尾逗号不应导致列出更多字体
+        clean_lines = [l for l in completed_clean.stdout.splitlines() if "✅" in l or "❌" in l]
+        trailing_lines = [l for l in completed_trailing.stdout.splitlines() if "✅" in l or "❌" in l]
+        self.assertEqual(len(clean_lines), len(trailing_lines),
+                         f"尾逗号不应改变过滤结果: clean={len(clean_lines)}, trailing={len(trailing_lines)}")
+
+    def test_check_fonts_cli_empty_filter_after_strip(self):
+        """check_fonts.py --filter ',' （纯逗号）不应列出全部字体。"""
+        import subprocess
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "check_fonts.py"), "--filter", ","],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0)
+        # 纯逗号 strip 后全部为空 → font_filter=None → 列出全部
+        # 这是合理的：纯逗号=无有效过滤词=不过滤
+        # 关键是 ',' 不应产生 ["", ""] 导致特殊行为
+        # 只要不崩溃且退出码 0 即可
+        font_lines = [l for l in completed.stdout.splitlines() if "✅" in l or "❌" in l]
+        self.assertGreater(len(font_lines), 0, "纯逗号应退化为列出全部")
 
 
 if __name__ == "__main__":

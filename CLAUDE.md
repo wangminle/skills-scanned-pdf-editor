@@ -7,3 +7,7 @@
 
 若本次未涉及任何任务完成，无需操作也无需提示。若已配置 `.claude/settings.json` 的 `Stop` hook，则由该 hook 保证每会话触发一次；**未配置时由 agent 在会话结束前自觉执行**（不要在未安装 hook 时写「由 Stop hook 保证触发」）。
 
+
+## 端到端测试结果目录（tests/results/）
+
+`tests/results/` 目录用于存放 skill 的端到端测试结果。文件名格式为 `yyyymmdd-xxxx-测试事由`（如 `20260807-0001-task001增加实习律师`），其中 `xxxx` 为四位顺序编号。该目录已在 `.gitignore` 中忽略，仅保留在本地用于回归对比。

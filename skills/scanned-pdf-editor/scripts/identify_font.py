@@ -111,8 +111,46 @@ def best_ncc(target_gray, font_path, idx, char):
     return best
 
 
-def parse_ref(s):
-    """char=x1,y1,x2,y2 -> (char, (x1,y1,x2,y2))"""
+def glyph_fingerprint(gray, thr=INK_THR):
+    """计算字形指纹：墨迹密度、水平/垂直投影峰值比。
+
+    NCC 衡量形状相似度但对笔画粗细不敏感（均值归一化消去了亮度差异）。
+    字形指纹补充密度信息：宋体笔画密度通常显著高于仿宋，即使 NCC 通过，
+    密度差异 >50% 也应警告用户复核。
+
+    返回 dict:
+      density     - 暗像素 / 外接框面积 (0~1)
+      h_v_ratio   - 水平投影峰值 / 垂直投影峰值；接近 1 表示横竖均衡（如黑体），
+                    <1 表示竖画比横画粗（宋体/仿宋常见）
+    """
+    m = gray < thr
+    h, w = gray.shape
+    total = h * w
+    if total == 0 or not m.any():
+        return {"density": 0.0, "h_v_ratio": 0.0}
+    dark = int(m.sum())
+    h_proj = m.sum(axis=1)   # 每行的暗像素数
+    v_proj = m.sum(axis=0)   # 每列的暗像素数
+    h_peak = int(h_proj.max())
+    v_peak = int(v_proj.max())
+    h_v_ratio = h_peak / v_peak if v_peak > 0 else 0.0
+    return {"density": dark / total, "h_v_ratio": h_v_ratio}
+
+
+def rendered_fingerprint(char, font_path, idx, size=36):
+    """渲染指定字体的字形并返回其指纹。"""
+    g = render_glyph(char, font_path, idx, size)
+    if g is None:
+        return None
+    return glyph_fingerprint(g)
+
+
+def parse_ref(s, image_size=None):
+    """char=x1,y1,x2,y2 -> (char, (x1,y1,x2,y2))
+
+    image_size=(W,H) 给出时，额外校验框完整落在图像内（BUG-061）——
+    越界框在 numpy 切片中会被静默截小，导致墨迹尺寸/密度计算偏移。
+    """
     # BUG-046：坐标个数错时旧实现 `x1,y1,x2,y2 = (...)` 直接 ValueError 裸 traceback。
     if '=' not in s:
         raise SystemExit(f"错误: --ref 格式应为 字符=x1,y1,x2,y2，收到: {s!r}")
@@ -131,6 +169,13 @@ def parse_ref(s):
         raise SystemExit(f"错误: --ref 坐标需全部非负，收到: {coords!r}")
     if x1 >= x2 or y1 >= y2:
         raise SystemExit(f"错误: --ref 坐标需满足 x1<x2 且 y1<y2，收到: {coords!r}")
+    if image_size is not None:
+        img_w, img_h = image_size
+        if x2 > img_w or y2 > img_h:
+            raise SystemExit(
+                f"错误: --ref {s!r} 坐标越出图像边界 {img_w}×{img_h}，"
+                "请核对坐标是否为该图像内的像素坐标。"
+            )
     return name.strip(), (x1, y1, x2, y2)
 
 
@@ -149,7 +194,7 @@ def main():
     targets = {}
     seen_chars: set[str] = set()
     for spec in args.ref:
-        ch, box = parse_ref(spec)
+        ch, box = parse_ref(spec, image_size=im.size)
         # BUG-046：同一字符名多次给出时旧实现静默覆盖，后面框取代前面框，
         # 用户可能误以为两个框都被采用。无论墨迹是否有效都应显式警告。
         if ch in seen_chars:
@@ -230,6 +275,43 @@ def main():
     else:
         verdict = '存疑（NCC 偏低，参考字可能太小/太糊，换更大的字）'
     print(f'=> 最优: {top_name}   均分={avg:.3f}  领先第二名 {margin:.3f}  ({verdict})')
+
+    # ── 密度交叉验证 ──
+    # NCC 对笔画粗细不敏感（均值归一化消去了亮度差异），但不同字体的
+    # 笔画密度差异很大（如宋体 vs 仿宋可差 2 倍）。即使 NCC 判定"确定"，
+    # 若密度差异过大也应警告用户复核。
+    # 典型案例: task002 原文为仿宋但本机未安装，Songti SC NCC 最高但每字
+    # 暗像素数是原文的 2 倍（205 vs 103），合成字明显偏粗。
+    top_fn, top_idx = cands[top_name]
+    top_path = resolve_font(top_fn)
+    if top_path:
+        ref_densities = [glyph_fingerprint(tg)["density"] for tg in targets.values()]
+        rend_densities = []
+        for ch in targets:
+            rfp = rendered_fingerprint(ch, top_path, top_idx)
+            if rfp is not None:
+                rend_densities.append(rfp["density"])
+        if ref_densities and rend_densities and (d_ref := sum(ref_densities) / len(ref_densities)) > 0.01:
+            d_rend = sum(rend_densities) / len(rend_densities)
+            ratio = d_rend / d_ref
+            print()
+            print('── 密度交叉验证 ──')
+            print(f'扫描件参考字平均密度: {d_ref:.3f}')
+            print(f'{top_name} 渲染字平均密度: {d_rend:.3f}')
+            print(f'密度比 (渲染/原文): {ratio:.2f}')
+            if ratio > 1.5:
+                print('⚠ 警告: 渲染字密度偏高（笔画偏粗），即使 NCC 得分最高，'
+                      '笔画粗细可能与原文字体不符。')
+                print('  典型场景: 原文为仿宋但本机未安装，误判为宋体（宋体笔画更密）。')
+                print('  建议: 1) 安装更多候选字体后重跑；'
+                      '2) 用 scan_text_fusion 加字后做像素级对比验证。')
+            elif ratio < 0.67:
+                print('⚠ 警告: 渲染字密度偏低（笔画偏细），即使 NCC 得分最高，'
+                      '笔画粗细可能与原文字体不符。')
+                print('  建议: 1) 安装更多候选字体后重跑；'
+                      '2) 用 scan_text_fusion 加字后做像素级对比验证。')
+            else:
+                print('密度匹配良好。')
 
     # 置信度不足且存在未安装候选时，提示可能是目标字体缺失。
     # 典型场景：公文/法律文书正文多为仿宋（simfang.ttf），本机未安装时

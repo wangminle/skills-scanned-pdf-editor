@@ -216,12 +216,18 @@ python3 scripts/scan_text_fusion.py --source page.png \
 
 ```
 1. 准备源图（200 dpi）
-2. 识别字体（灰度 NCC，必做）
-3. 识别字号（多阈值共识）
-4. 取样参考颜色
-5. 扫描融合 + 蓝灰晕染
-6. 迭代微调
+2. 识别字体（灰度 NCC + 密度交叉验证，必做）
+3. 识别字号（多阈值共识，须用上一步识别出的字体）
+4. 取样参考颜色（--preview-ink 可预览最终墨色）
+5. 对齐垂直中心（align_text.py，防止上下偏移）
+6. 扫描融合 + 蓝灰晕染
+7. 迭代微调
 ```
+
+> **工具链联动警告**：第 2→3 步有依赖--`identify_size.py` 的 `--font` 必须填第 2 步
+> 识别出的字体。若第 2 步给了"参考/存疑"结果，第 3 步用错误字体识别字号会级联失败
+> （字号偏大/偏小）。第 2 步不确定时先解决字体问题（安装缺失候选后重跑），不要带着
+> 不确定的结果进入第 3 步。
 
 **为什么 200 dpi**：扫描融合的 alpha 上限约 0.93，无法复现极重墨扫描件的暗度；200 dpi 下采样把整页均匀变浅，落在融合可达范围内，自洽。删除/移动/替换用 300 dpi 或内嵌图（纯搬像素需高精度）。
 
@@ -230,6 +236,28 @@ python3 scripts/scan_text_fusion.py --source page.png \
 ```bash
 pdftoppm -png -r 200 -f 2 -l 2 "源.pdf" page      # 产出 page-2.png
 ```
+
+#### 第 1.5 步：检查字体环境（首次使用或换机器时必做）
+
+扫描件原文字体可能与本机已装字体不同。中文公文/法律文书正文常为仿宋（`simfang.ttf`），
+macOS 和 Linux 默认不带。**字体缺失是加字效果不符的头号原因**（NCC 偏低、笔画密度 2 倍偏差）。
+
+```bash
+python3 scripts/check_fonts.py
+```
+
+脚本列出全部已注册 CJK 字体的安装状态，对缺失字体给出平台特定的安装方法。
+关键场景：
+
+- **macOS 缺仿宋**：从你的 Windows 机器复制 `simfang.ttf`，双击安装（落到 `~/Library/Fonts/`），
+  或用 `--source-dir` 从挂载的 Windows 分区自动复制：
+  ```bash
+  python3 scripts/check_fonts.py --source-dir /Volumes/Windows/Windows/Fonts --yes
+  ```
+- **开源替代**：若无法获取 Windows 字体，`check_fonts.py` 也会列出 Homebrew 可装的
+  Noto / Source Han 开源字体。注意开源字体与原文可能不完全匹配（笔画粗细有差异）。
+
+> 安装字体后无需重启，直接重跑 `identify_font.py` 即可生效。
 
 #### 第 2 步：识别字体（必做，不可跳过）
 
@@ -242,6 +270,10 @@ python3 scripts/identify_font.py --source page.png \
 
 判定"确定（明显领先）"才采用，且衬线应明显优于无衬线。
 仅有一个已装候选字体时只会给出「参考」，须安装更多候选再交叉验证，或结合文档类型判断。
+
+> **密度交叉验证**：脚本会额外计算扫描参考字与渲染字的墨迹密度比。即使 NCC 最高，
+> 若密度差异 >50%（渲染字偏粗/偏细），会输出警告。典型场景：原文是仿宋但本机未安装，
+> 误判为宋体（宋体笔画密度约为仿宋 2 倍）。看到此警告时先安装缺失字体再重跑。
 
 #### 第 3 步：识别字号
 
@@ -260,7 +292,27 @@ python3 scripts/scan_text_fusion.py --source page.png \
   --sample-only 315 788 675 835
 ```
 
-#### 第 5 步：融合加字
+也可用 `--preview-ink` 预览最终墨色（含优先级解析：显式 `--ink-color` > `--reference-box` 采样 > 默认）：
+
+```bash
+python3 scripts/scan_text_fusion.py --source page.png \
+  --reference-box 315 788 675 835 --preview-ink
+```
+
+#### 第 5 步：对齐垂直中心
+
+不同字体的 ascent/descent 不同，直接用行上沿 Y 坐标绘制会导致墨迹中心偏移。
+用 `align_text.py` 计算对齐后的 Y：
+
+```bash
+python3 scripts/align_text.py --source page.png \
+  --ref-box 558,557,587,585 \
+  --font "仿宋" --size 32 --text "（实习律师）" --y 554
+```
+
+输出调整后的 Y 值，用于下一步 `--position` 的 Y 坐标。
+
+#### 第 6 步：融合加字
 
 ```bash
 python3 scripts/scan_text_fusion.py --source page.png \
@@ -271,7 +323,7 @@ python3 scripts/scan_text_fusion.py --source page.png \
   --crop-box 300 500 850 645
 ```
 
-#### 第 6 步：迭代微调
+#### 第 7 步：迭代微调
 
 看 crop 预览，对照邻近原扫描字，按"调参指引"小步调整。
 
@@ -283,7 +335,7 @@ python3 scripts/scan_text_fusion.py --source page.png \
 | 颜色偏黑/偏浅 | 重新取样 `--ink-color`，每通道 ±2~4 |
 | 缺蓝灰底色感 | `--halo-strength` 上调 |
 | 像人工描边、蓝太明显 | `--halo-strength` 下调 |
-| 位置偏上/偏下 | `--position` Y 微调（±2px） |
+| 位置偏上/偏下 | 先用 `align_text.py` 计算对齐 Y，再微调 `--position` Y（±2px） |
 
 **关键**：客观噪声指标可能与人眼相反，最终以 crop 人眼对比为准。
 
@@ -337,7 +389,7 @@ python3 scripts/verify_outputs.py --config verify_config.json --strict-hash
 python3 scripts/verify_outputs.py --config verify_config.json --reproduce
 
 # 自测
-cd scripts && python3 -m pytest test_skill.py
+cd scripts && python3 -m pytest ../../../tests/scripts/test_skill.py
 ```
 
 ## PDF 封装
@@ -379,77 +431,15 @@ python3 scripts/scan_edit_ops.py package \
 
 ## 工具参考
 
-### scan_edit_ops.py（删除/移动/替换/封装/验证）
+各脚本的完整参数表、字体注册目录与安装引导见 [`references/scripts_reference.md`](references/scripts_reference.md)。要点速查：
 
-| 子命令 | 功能 |
-|---|---|
-| `remove` | 删除指定区域（telea / interpolate） |
-| `move` | 移动像素块并清理残留 |
-| `replace` | 原生供体替换 |
-| `compound` | 复合操作：复制源块→清除多个区域→粘贴源块到新位置 |
-| `package` | 将编辑后的图片封装为 PDF（新建或替换内嵌图） |
-| `verify` | 像素级验证（变化像素、外框、区外变化、空白行） |
-
-### scan_text_fusion.py（增加文字）
-
-| 参数 | 说明 | 默认 |
-|---|---|---|
-| `--source` | 源扫描图（必填） | - |
-| `--text` | 要加的文字 | `（实习律师）` |
-| `--position X Y` | 文字左上角坐标（必填） | - |
-| `--font` | 字体（路径/注册名/文件名） | 本机首个可用 CJK 字体 |
-| `--font-size` | 字号 | 31 |
-| `--ink-color R G B` | 笔画主体色 | 90 97 106 |
-| `--reference-box` | 框选参考文字自动取样（须非负且有序） | - |
-| `--halo-color R G B` | 边缘晕染色 | 178 196 211 |
-| `--stage` | clean/fusion/halo/all | halo |
-| `--scan-style` | clean/rough | rough |
-| `--fusion-strength` | 融合粗糙度倍率 | 按 scan-style |
-| `--halo-strength` | 蓝灰晕染强度倍率 | 1.0 |
-| `--variants` | 生成融合强度对比接触图 | off |
-| `--compare` | 前后对比图 | off |
-| `--stroke-shoulder` | 字重肩部混合权重（替换后备建议 0.25） | 0.0 |
-| `--core-alpha-scale` | 核心透明度缩放（替换后备建议 0.875） | 0.965 |
-| `--seed` | 随机种子 | 20260701 |
-| `--output-dir` | 输出目录 | `./scan_text_fusion_out` |
-| `--output` | 最终文件名（`--output-dir` 内的文件名，不是完整路径） | `<源名>_text_fused.png` |
-
-### identify_font.py（字体识别）
-
-```bash
-python3 scripts/identify_font.py --source page.png \
-  --ref 字1=x1,y1,x2,y2 --ref 字2=x1,y1,x2,y2
-```
-
-### identify_size.py（字号识别）
-
-```bash
-python3 scripts/identify_size.py --source page.png --font <字体> \
-  --ref 字1=x1,y1,x2,y2 --ref 字2=x1,y1,x2,y2
-```
-
-`--font` 接受三种写法：完整路径、注册名（如 `仿宋`）、纯文件名。注册名/文件名会经
-`font_registry.find_font()` 解析成真实路径与 ttc 索引（注册名匹配大小写不敏感）；
-`--font-index` 仅当 `--font` 是显式路径时生效。找不到字体时报错退出（码 2），不再像旧版
-那样因 `ImageFont.truetype` 报 `cannot open resource` 而崩在渲染步骤。`--ref` 框须非负且有序。
-
-### font_registry.py（跨平台字体注册表）
-
-`--font` 接受三种写法：完整路径、注册名（如 `仿宋` / `songti`）、纯文件名。不给时按正文优先级
-（仿宋 > 宋体 > STSong > …）取本机首个可用 CJK 字体。注册名模糊匹配大小写不敏感。
-
-FONT_DIRS 覆盖 Windows / macOS / Linux 常见目录，包括 macOS 用户级 `~/Library/Fonts`
-（双击字体文件"为我安装"的默认落点）和网络共享 `/Network/Library/Fonts`。macOS 上安装
-字体后无需额外配置即可被识别。
-
-| 系统 | 仿宋 | 宋体 | 黑体 |
-|---|---|---|---|
-| Windows | `C:/Windows/Fonts/simfang.ttf` | `C:/Windows/Fonts/simsun.ttc` | `C:/Windows/Fonts/simhei.ttf` |
-| macOS | 需自行安装（放入 `~/Library/Fonts`） | `Songti.ttc`（需识别确认 index） | - |
-
-> **字体缺失时**：`identify_font.py` 会在置信度不足（参考/存疑）且有未安装候选时提示
-> 可能因目标字体缺失，并给出安装路径。公文/法律文书正文常见仿宋（`simfang.ttf`），
-> 若本机未安装，合成字会偏粗偏黑、NCC 也到不了"确定"。安装后重跑即可。
+- **scan_edit_ops.py**：`remove` / `move` / `replace` / `compound` / `package` / `verify` 六个子命令（各模式参数见模式 A–C 与 PDF 封装节）。
+- **scan_text_fusion.py**：增加/替换文字的融合引擎。关键参数 `--ink-color`（显式 > `--reference-box` 采样 > 默认）、`--stroke-shoulder`、`--core-alpha-scale`、`--preview-ink`。
+- **identify_font.py**：NCC 排名 + 墨迹密度交叉验证（密度差 >50% 警告）。
+- **identify_size.py**：`--font` 须填上一步识别的字体，否则级联失败。
+- **align_text.py**：墨迹垂直重心对齐，算出调整后 Y 给 `--position` 用。
+- **font_registry.py**：`--font` 三写法（路径/注册名/文件名），含 macOS `~/Library/Fonts`。
+- **check_fonts.py**：CJK 字体安装状态检查 + 平台安装引导 + `--source-dir` 自动复制。
 
 ## 调参安全范围
 

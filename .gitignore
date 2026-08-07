@@ -218,3 +218,12 @@ scan_text_fusion_out/
 # User task working directories (process artifacts, not source)
 tmp/
 tasks/
+
+# Test task PDFs (large binary fixtures, not source code)
+tests/测试任务/
+
+# End-to-end test results (runtime artifacts, not source code)
+tests/results/
+
+# Expected result reference images (large binary, not source code)
+tests/期望效果/

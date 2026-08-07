@@ -29,6 +29,11 @@
 
 - 版本升至 V0.1.2；`SKILL.md` / README 同步非负坐标、move x 越界、donor 框、feather 小尺寸、单候选字体判定、`page-index` 范围等
 
+### 功能（V0.1.2 后续增量）
+
+- **DEV-007**：`check_fonts.py` 字体环境检查与安装引导脚本 -- 检查全部注册 CJK 字体安装状态，对缺失字体提供平台特定安装方法（Windows 字体来源说明 + 开源替代 Homebrew/apt 命令），支持 `--source-dir` 从挂载的 Windows 分区自动复制字体文件；SKILL.md 增加第 1.5 步「检查字体环境」
+- 单元测试 178 项；`run_checks.sh` ✅
+
 ## V0.1.1-Build0178-20260806
 
 相对 V0.1.0（Build0177）的硬化与文档同步：

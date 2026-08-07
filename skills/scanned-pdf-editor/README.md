@@ -16,7 +16,7 @@
 cd scripts
 
 # 自测
-python3 -m pytest test_skill.py -v
+python3 -m pytest ../../../tests/scripts/test_skill.py -v
 
 # 回归门禁（静态检查 + 单元测试，任一失败即非零退出）
 ./run_checks.sh
@@ -69,7 +69,6 @@ pip3 install -r scripts/requirements.txt
 ## 文件结构
 
 ```
-evals/                     确定性行为自检 + EVAL.md 真实模型评测指南
 scripts/
   font_registry.py        跨平台 CJK 字体注册表
   identify_font.py         字体识别（灰度 NCC + 多字聚合）
@@ -78,8 +77,7 @@ scripts/
   scan_edit_ops.py         统一 CLI：删除/移动/替换/封装/验证
   scan_text_fusion.py      扫描融合 + 蓝灰晕染（增加文字路线）
   verify_outputs.py        泛化验证框架（JSON 配置驱动）
-  test_skill.py            自测
-  run_checks.sh            回归门禁（ruff scripts+evals + pytest）
+  run_checks.sh            回归门禁（ruff + pytest）
   requirements.txt         Python 依赖
 references/
   pipeline_methodology.md  方法论参考（原理、视觉判断、参数安全范围）

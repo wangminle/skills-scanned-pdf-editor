@@ -51,11 +51,13 @@ def best_size_for_threshold(font_path, font_index, refs_scan_dims, sizes, thr):
     best = min(agg, key=agg.get)
     return best, agg
 
-def parse_ref(s):
+def parse_ref(s, image_size=None):
     """char=x1,y1,x2,y2 -> (char, (x1,y1,x2,y2))
 
     BUG-050：旧实现 r.split('=') / box.split(',') 无校验--缺等号、坐标个数错、
     负坐标回绕均产生裸 traceback 或静默错位。与 identify_font.parse_ref 对齐。
+    BUG-061：image_size=(W,H) 给出时校验框完整落在图像内——越界框静默截小
+    会导致墨迹尺寸计算偏移。
     """
     if '=' not in s:
         raise SystemExit(f"错误: --ref 格式应为 字符=x1,y1,x2,y2，收到: {s!r}")
@@ -73,6 +75,13 @@ def parse_ref(s):
         raise SystemExit(f"错误: --ref 坐标需全部非负，收到: {coords!r}")
     if x1 >= x2 or y1 >= y2:
         raise SystemExit(f"错误: --ref 坐标需满足 x1<x2 且 y1<y2，收到: {coords!r}")
+    if image_size is not None:
+        img_w, img_h = image_size
+        if x2 > img_w or y2 > img_h:
+            raise SystemExit(
+                f"错误: --ref {s!r} 坐标越出图像边界 {img_w}×{img_h}，"
+                "请核对坐标是否为该图像内的像素坐标。"
+            )
     return name.strip(), (x1, y1, x2, y2)
 
 
@@ -103,10 +112,11 @@ def main():
     arr = np.asarray(Image.open(args.source).convert('L')).astype(np.float32)
     sizes = [int(s) for s in args.sizes.split(',')]
     thrs = [int(t) for t in args.thresholds.split(',')]
+    img_size = (arr.shape[1], arr.shape[0])
 
     refs_dims = []
     for r in args.ref:
-        ch, box = parse_ref(r)
+        ch, box = parse_ref(r, image_size=img_size)
         x1, y1, x2, y2 = box
         refs_dims.append((ch, arr[y1:y2, x1:x2]))
 

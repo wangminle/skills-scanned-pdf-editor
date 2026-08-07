@@ -82,22 +82,62 @@ def available_cjk_fonts() -> list[tuple[str, str, int]]:
     return out
 
 
+def _name_tokens(name: str) -> list[str]:
+    """把注册名拆成语义 token，用于精确/前缀匹配。
+
+    拆分规则：去掉括号后，按空格/标点分词，再补充括号内的整体英文段。
+    例如 '仿宋 (FangSong)' → ['仿宋', 'fangsong']，
+         'Songti SC' → ['songti', 'sc']，
+         'Hiragino Sans GB W3' → ['hiragino', 'sans', 'gb', 'w3']。
+    """
+    import re
+    # 先提取括号内的英文段（如 FangSong、SimSun），作为整体 token
+    paren_match = re.search(r"\(([^\)]+)\)", name)
+    tokens = []
+    # 括号前的主体（中文部分或英文短语）
+    main = re.split(r"[\(\)]", name)[0].strip()
+    for part in re.split(r"[\s\-_,]+", main):
+        if part:
+            tokens.append(part.lower())
+    if paren_match:
+        inner = paren_match.group(1).strip()
+        if inner:
+            tokens.append(inner.lower())
+    return tokens
+
+
 def find_font(spec: str | None) -> tuple[str, int] | None:
     """把用户给的 --font 解析成 (路径, 索引)。
 
-    支持三种写法：完整路径、注册名（如 '仿宋'/'宋体'，模糊匹配）、纯文件名。
+    支持三种写法：完整路径、注册名（如 '仿宋'/'宋体'，token 匹配）、纯文件名。
     找不到返回 None。
+
+    匹配规则（BUG-059）：旧实现用 ``spec in name`` 裸子串匹配，过宽——
+    'Song' 会命中 'FangSong'（仿宋），'SC' 命中 'Songti SC'，'GB' 命中
+    'Hiragino Sans GB'。改为 token 级匹配：注册名拆成语义段（仿宋/FangSong/
+    Songti/SC），用户输入须**精确等于**某 token 或是其前缀，而非任意子串。
+    中文同理：'宋' 不应命中 '仿宋'（'宋' 只是 token '仿宋' 的后缀，不是前缀）。
     """
     if not spec:
         return None
     if os.path.exists(spec):
         return (spec, 0)
     spec_l = spec.lower()
-    # BUG-044：旧实现 `spec in name` 大小写敏感——find_font("Songti") 命中注册名
-    # "Songti SC" 而 find_font("songti") 返回 None，与文件名匹配的 lower() 行为不一致。
-    # 注册名也统一按小写比较，与文件名匹配行为对齐。
     for name, (fn, idx) in CJK_FONTS.items():
-        if spec_l in name.lower() or fn.lower() == spec_l:
+        matched = False
+        # 文件名精确匹配（允许不带后缀，如 'simfang' 匹配 'simfang.ttf'）
+        fn_lower = fn.lower()
+        fn_stem = fn_lower.rsplit(".", 1)[0] if "." in fn_lower else fn_lower
+        if spec_l == fn_lower or spec_l == fn_stem:
+            matched = True
+        # token 匹配：用户输入须精确等于某 token 或是其前缀（≥2 字符）
+        # 中文也走此路径：'宋' 不是 '仿宋' 的前缀（是后缀），不会误命中
+        if not matched:
+            for token in _name_tokens(name):
+                if spec_l == token or (len(spec_l) >= 2 and token.startswith(spec_l)):
+                    matched = True
+                    break
+        if matched:
             p = resolve_font(fn)
             if p:
                 return (p, idx)

@@ -66,17 +66,27 @@ SCAN_STYLE_DEFAULTS = {
 
 
 # ───────────────────────────── 基础工具 ─────────────────────────────
-def validate_box(box: Sequence[int], name: str) -> tuple[int, int, int, int]:
-    """校验 4 元组坐标：非负 + x1<x2 + y1<y2。
+def validate_box(box: Sequence[int], name: str,
+                 image_size: tuple[int, int] | None = None) -> tuple[int, int, int, int]:
+    """校验 4 元组坐标：非负 + x1<x2 + y1<y2，可选校验完整落在图像内。
 
     BUG-051：--reference-box / --sample-only / --crop-box 用 type=int 直接接收，
     负坐标会在 numpy 切片 / PIL crop 中静默回绕或截断到错误区域（与 BUG-037 同族）。
+    BUG-061：框越出图像边界时，PIL crop 会用黑色填充越界区（产生黑边），numpy 切片
+    会静默截小。给出 image_size 时校验框完整落在 [0,W]×[0,H] 内，越界报错而非静默。
     """
     x1, y1, x2, y2 = box
     if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0:
         raise SystemExit(f"错误: --{name} 坐标需全部非负（像素坐标），收到: {list(box)}。")
     if x1 >= x2 or y1 >= y2:
         raise SystemExit(f"错误: --{name} 坐标需满足 x1<x2 且 y1<y2，收到: {list(box)}。")
+    if image_size is not None:
+        img_w, img_h = image_size
+        if x2 > img_w or y2 > img_h:
+            raise SystemExit(
+                f"错误: --{name} {list(box)} 越出图像边界 {img_w}×{img_h}。"
+                "请核对坐标是否为该图像内的像素坐标。"
+            )
     return (x1, y1, x2, y2)
 
 
@@ -386,18 +396,26 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
         font_path, font_index = font_registry.require_default_font()
     font = load_font(font_path, args.font_size, index=font_index)
 
-    # 颜色：参考框取样 > 显式 ink-color > 默认
-    if args.reference_box:
-        ref_box = validate_box(args.reference_box, "reference-box")
+    # 颜色优先级（BUG-053 修复）：显式 --ink-color > --reference-box 采样 > 内置默认。
+    # 旧实现中 --reference-box 静默覆盖 --ink-color，导致用户手动指定深墨色时被自动采样值替换。
+    if args.ink_color is not None:
+        ink_color = tuple(args.ink_color)
+        if args.reference_box:
+            ref_box = validate_box(args.reference_box, "reference-box", base.size)
+            sampled = sample_ink_color(base, ref_box, quiet=False)
+            print(f"sampled ink color (reference): {sampled}")
+            print(f"using explicit --ink-color: {ink_color} (overrides sampled)")
+    elif args.reference_box:
+        ref_box = validate_box(args.reference_box, "reference-box", base.size)
         ink_color = sample_ink_color(base, ref_box, quiet=False)
         print(f"sampled ink color: {ink_color}")
     else:
-        ink_color = tuple(args.ink_color)
+        ink_color = DEFAULT_INK_COLOR
 
     halo_color = tuple(args.halo_color)
 
     # crop 框
-    crop_box = validate_box(args.crop_box, "crop-box") if args.crop_box else auto_crop_box(
+    crop_box = validate_box(args.crop_box, "crop-box", base.size) if args.crop_box else auto_crop_box(
         tuple(args.position), base.size, args.text, args.font_size)
 
     stem = source.stem
@@ -494,7 +512,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--font-index", type=int, default=DEFAULT_FONT_INDEX, help="ttc 字体索引（默认 0）")
     p.add_argument("--font-size", type=int, default=DEFAULT_FONT_SIZE, help="字号（默认 31；用 identify_size.py 定）")
     p.add_argument("--ink-color", type=int, nargs=3, metavar=("R", "G", "B"),
-                   default=list(DEFAULT_INK_COLOR), help="笔画主体颜色（默认 90 97 106）")
+                   default=None, help="笔画主体颜色（显式指定时优先于 --reference-box 采样；"
+                   "不给则按 --reference-box 采样或用内置默认 90 97 106）")
     p.add_argument("--reference-box", type=int, nargs=4, metavar=("X1", "Y1", "X2", "Y2"),
                    help="框选原扫描参考文字：自动取样 ink 颜色，并作为 --variants 接触图的 scan 参考格")
     p.add_argument("--halo-color", type=int, nargs=3, metavar=("R", "G", "B"),
@@ -519,7 +538,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--core-alpha-scale", type=float, default=DEFAULT_CORE_ALPHA_SCALE,
                    help="核心透明度缩放（默认 0.965=增加文字；替换后备 C-2 建议 0.875）")
     p.add_argument("--seed", type=int, default=DEFAULT_SEED, help="随机种子（默认 20260701=复现定稿）")
-    p.add_argument("--output-dir", type=Path, default=Path("./scan_text_fusion_out"), help="输出目录")
+    p.add_argument("--output-dir", type=Path, default=None,
+                   help="输出目录（不给则在源文件同目录下建 scan_text_fusion_out/）")
     p.add_argument(
         "--output",
         help="最终文件名（相对 --output-dir 内的文件名，不是完整路径；默认 <源名>_text_fused.png）",
@@ -528,6 +548,10 @@ def build_parser() -> argparse.ArgumentParser:
     # 诊断模式：只取样颜色
     p.add_argument("--sample-only", type=int, nargs=4, metavar=("X1", "Y1", "X2", "Y2"),
                    help="只对参考框取样并打印颜色统计后退出（不生成图）")
+    # 诊断模式：预览最终墨色（含优先级解析 + 色块图）
+    p.add_argument("--preview-ink", action="store_true",
+                   help="按当前参数解析最终墨色（显式 --ink-color > --reference-box 采样 > 默认），"
+                        "打印对比并生成色块图后退出（不生成融合图）")
     return p
 
 
@@ -535,20 +559,88 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # 输出目录默认跟随源文件（不污染 CWD / repo 根目录）
+    if args.output_dir is None:
+        args.output_dir = Path(args.source).resolve().parent / "scan_text_fusion_out"
+
     if args.sample_only:
         source = Path(args.source)
         if not source.exists():
             raise FileNotFoundError(f"Source image not found: {source}")
-        sample_ink_color(load_rgb(source), validate_box(args.sample_only, "sample-only"), quiet=False)
+        base_sample = load_rgb(source)
+        sample_ink_color(base_sample, validate_box(args.sample_only, "sample-only", base_sample.size), quiet=False)
         return 0
 
-    # --sample-only 已 return；其余模式都需要 --position
+    if args.preview_ink:
+        source = Path(args.source)
+        if not source.exists():
+            raise FileNotFoundError(f"Source image not found: {source}")
+        base = load_rgb(source)
+        output_dir = ensure_dir(Path(args.output_dir))
+
+        # 与 run() 相同的优先级逻辑（BUG-053 修复后）：显式 > 采样 > 默认
+        if args.ink_color is not None:
+            ink_color = tuple(args.ink_color)
+            source_label = "显式 --ink-color"
+            if args.reference_box:
+                ref_box = validate_box(args.reference_box, "reference-box", base.size)
+                sampled = sample_ink_color(base, ref_box, quiet=False)
+                print(f"sampled ink color (reference): {sampled}")
+                print(f"using explicit --ink-color: {ink_color} (overrides sampled)")
+        elif args.reference_box:
+            ref_box = validate_box(args.reference_box, "reference-box", base.size)
+            ink_color = sample_ink_color(base, ref_box, quiet=False)
+            source_label = "--reference-box 采样"
+            print(f"sampled ink color: {ink_color}")
+        else:
+            ink_color = DEFAULT_INK_COLOR
+            source_label = "内置默认"
+
+        print("\n── 墨色预览 ──")
+        print(f"最终墨色: {ink_color}  (来源: {source_label})")
+        print(f"内置默认: {DEFAULT_INK_COLOR}")
+        # 色差简单提示
+        diff = sum(abs(a - b) for a, b in zip(ink_color, DEFAULT_INK_COLOR))
+        if diff > 30:
+            print(f"⚠ 色差较大 (Δ={diff})，建议确认采样框选的是原文笔画区域。")
+        else:
+            print(f"色差较小 (Δ={diff})，与默认接近。")
+
+        # 生成色块对比图
+        swatch = Image.new("RGB", (240, 80), "white")
+        draw = ImageDraw.Draw(swatch)
+        draw.rectangle([0, 0, 119, 79], fill=ink_color)
+        draw.rectangle([121, 0, 240, 79], fill=DEFAULT_INK_COLOR)
+        draw.text((4, 4), f"ink\n{ink_color}", fill=(255, 255, 255) if sum(ink_color) < 384 else (0, 0, 0))
+        draw.text((125, 4), f"default\n{DEFAULT_INK_COLOR}", fill=(0, 0, 0))
+        swatch_path = output_dir / "ink_preview.png"
+        swatch.save(swatch_path)
+        print(f"色块图: {swatch_path}")
+        return 0
+
+    # --sample-only / --preview-ink 已 return；其余模式都需要 --position
     if args.position is None:
-        parser.error("--position X Y 为必填（仅 --sample-only 诊断模式可省略）")
+        parser.error("--position X Y 为必填（仅 --sample-only / --preview-ink 诊断模式可省略）")
 
     # --fusion-strength 缺省 = 按 --scan-style 解析（消除"文档说 0.3~0.5、默认却 1.0"的冲突）
     if args.fusion_strength is None:
         args.fusion_strength = SCAN_STYLE_DEFAULTS[args.scan_style]["fusion"]
+
+    # BUG-060：float 类参数校验——argparse 的 type=float 接受 nan/inf，负数 strength
+    # 会让 rng.normal(scale<0) 裸 ValueError，nan 会让 alpha 全 nan → 全黑图（仅 RuntimeWarning，rc=0）。
+    # 在进入渲染前统一拦截。
+    for attr, label in [
+        ("fusion_strength", "--fusion-strength"),
+        ("halo_strength", "--halo-strength"),
+        ("stroke_shoulder", "--stroke-shoulder"),
+        ("core_alpha_scale", "--core-alpha-scale"),
+    ]:
+        value = getattr(args, attr)
+        if not np.isfinite(value) or value < 0:
+            parser.error(
+                f"{label} 需为有限非负数（≥0），收到: {value}。"
+                "nan/inf/负数会导致渲染异常或全黑输出。"
+            )
 
     outputs = run(args)
     print(f"source: {args.source}")
