@@ -355,7 +355,7 @@ def cmd_package(args: argparse.Namespace) -> int:
 
     两种模式：
     - --original-pdf 给出时：用 PyMuPDF replace_image 替换内嵌图，保留 OCR 文字层
-    - 不给 --original-pdf 时：用 ReportLab 按指定页面尺寸新建 PDF
+    - 不给 --original-pdf 时：用 PyMuPDF 按指定页面尺寸新建单页 PDF
     """
     from PIL import Image as PILImage
     image = PILImage.open(args.source).convert("RGB")

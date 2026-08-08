@@ -21,8 +21,6 @@ import cv2
 import numpy as np
 import pypdfium2 as pdfium
 from PIL import Image, ImageFont
-from reportlab.lib.utils import ImageReader
-from reportlab.pdfgen import canvas
 
 import font_registry
 
@@ -88,7 +86,12 @@ def save_image_as_pdf(
     title: str,
     subject: str,
 ) -> None:
-    """按原页面点尺寸封装整页图，避免按 A4 常量误改非标准扫描页。"""
+    """按原页面点尺寸封装整页图，避免按 A4 常量误改非标准扫描页。
+
+    使用 PyMuPDF 新建单页 PDF。
+    """
+    import fitz
+
     width, height = page_size
     # BUG-030：0/负数 page_size 仍能写出无效 PDF（0×0 页面），应在封装前拦截。
     if not (np.isfinite(width) and np.isfinite(height)) or width <= 0 or height <= 0:
@@ -97,20 +100,19 @@ def save_image_as_pdf(
             "请检查 --page-size 参数或 dpi 推算结果。"
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pdf = canvas.Canvas(str(output_path), pagesize=page_size)
-    pdf.setTitle(title)
-    pdf.setSubject(subject)
-    pdf.drawImage(
-        ImageReader(image),
-        0,
-        0,
-        width=width,
-        height=height,
-        preserveAspectRatio=False,
-        mask="auto",
-    )
-    pdf.showPage()
-    pdf.save()
+
+    temporary = output_path.with_suffix(".tmp.pdf")
+    document = fitz.open()
+    try:
+        page = document.new_page(width=width, height=height)
+        buffer = BytesIO()
+        image.convert("RGB").save(buffer, format="PNG", optimize=True)
+        page.insert_image(page.rect, stream=buffer.getvalue())
+        document.set_metadata({"title": title or "", "subject": subject or ""})
+        document.save(str(temporary), garbage=4, deflate=True)
+    finally:
+        document.close()
+    temporary.replace(output_path)
 
 
 def replace_pdf_image(

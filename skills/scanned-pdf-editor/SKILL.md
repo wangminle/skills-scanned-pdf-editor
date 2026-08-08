@@ -1,12 +1,13 @@
 ---
 name: scanned-pdf-editor
 description: 对用户有权编辑的扫描版 PDF 或扫描件图片做局部编辑（删除内容、移动位置、替换文字、补录新文字），使修改区域在字体、字号、墨色、纸纹、扫描噪点上与原扫描件像素级一致。仅用于授权且内容真实的场景，不用于伪造或篡改以误导第三方。
-version: V0.1.2
+version: V0.1.4
 ---
 
 # 扫描版 PDF 编辑修改（scanned-pdf-editor）
 
-> **版本**：V0.1.2（见仓库根目录 `VERSION` / `CHANGELOG.md`）
+> **版本**：V0.1.4（见仓库根目录 `VERSION` / `CHANGELOG.md`）
+> **运行环境**：Python 3.10+
 
 对扫描版 PDF 或扫描件图片做局部编辑，使修改区域在字体、字号、墨色、纸纹、扫描噪点上
 与原扫描件保持一致。**仅用于用户有权编辑、且修改内容真实的场景**。
@@ -396,7 +397,7 @@ cd scripts && python3 -m pytest ../../../tests/scripts/test_skill.py
 
 编辑完成后的 PNG 需要封装回 PDF。两种方式：
 
-### 方式一：新建 PDF（ReportLab）
+### 方式一：新建 PDF（PyMuPDF）
 
 适合从整页图新建 PDF，按原始页面点尺寸封装。
 

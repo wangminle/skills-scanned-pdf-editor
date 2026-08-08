@@ -87,6 +87,8 @@
 | ADJ-006 | 调整 | identify_font.py 置信度不足（参考/存疑）且有未安装候选时，提示目标字体可能缺失并给出安装路径；无已装字体时也报错引导 | 2026-08-05 20:15 | 2026-08-05 20:25 | 已完成 | 三路径验证：确定不提示、参考/存疑提示安装路径、无已装字体报错+引导 exit 1；见 [[BUG-015]] |
 | ADJ-007 | 调整 | 移除 evals/ 目录：用户决定 skill 质量通过实际 CLI 使用验证，无需单独 eval 测试（tests/ 测试用例不随 skill 安装到用户环境，eval 引用外部文件无实际价值） | 2026-08-07 14:00 | 2026-08-07 19:15 | 已完成 | 删除 evals/ 全部文件（eval_cases.json/evals.json/run_evals.py/EVAL.md/README.md）；run_checks.sh ruff check .. -> .；README.md 移除 evals/ 行；test_skill.py 移除 7 项 evals 依赖测试 + 3 个 _load_run_evals 辅助方法，替换 2 项 BUG-027 测试；测试数 159->152；三处安装目录同步更新；见 [[BUG-018]] [[BUG-026]] [[BUG-027]] [[BUG-034]] [[BUG-042]] [[BUG-047]] [[TST-006]] [[TST-009]] |
 | ADJ-008 | 调整 | 将 test_skill.py 从 skills/scanned-pdf-editor/scripts/ 移至 tests/scripts/：测试文件属开发层面，不随 skill 安装到用户环境 | 2026-08-07 19:20 | 2026-08-07 19:25 | 已完成 | test_skill.py 中所有 Path(__file__).parent 改为 SCRIPTS_DIR 常量指向 skills 脚本目录；E402 加 noqa；run_checks.sh 用 PROJECT_ROOT 变量定位测试文件；README.md/SKILL.md 更新测试命令路径；三处安装目录同步删除 test_skill.py；152 passed / ruff 全清 / run_checks.sh ✅ |
+| ADJ-009 | 调整 | 去掉 ReportLab：`save_image_as_pdf` 改用 PyMuPDF 新建单页 PDF；package 两种模式统一 | 2026-08-08 12:21 | 2026-08-08 12:25 | 已完成 | requirements 移除 reportlab；单测校验页尺寸/元数据/源码无 reportlab；196 passed / run_checks ✅；见 [[OPT-004]] [[DOC-017]] |
+
 ## 检查事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -125,6 +127,9 @@
 | CHK-031 | 检查 | 第七轮全项目 bug 复查：178 单测全绿后，Bugbot + 并行代码审查 + 亲自复现；确认 BUG-054～057 已关闭；登记 [[BUG-058]]～[[BUG-062]]（旋转回归最重） | 2026-08-07 21:14 | 2026-08-07 21:14 | 已完成 | 基线 178 passed；Rotate=270 回渲 vs embedded MAE≈71 已复现；find_font Song→simfang、filter 尾逗号、fusion nan→全黑 已复现；代码未修，待用户决定 |
 | CHK-032 | 检查 | 修复 [[BUG-058]]～[[BUG-062]] 并全量回归验证：旋转双重旋转根因深挖 + find_font token 化 + fusion 数值校验 + 框越界校验 + filter 空串过滤 | 2026-08-07 21:56 | 2026-08-07 21:56 | 已完成 | 5 项全部修复。BUG-058 根因：PDFium FPDF_GetPageWidthF 已返回旋转后尺寸，render 内部已应用 /Rotate，rotation 参数是附加旋转；真实 Rotate=270 扫描件验证修复后 pypdfium2 与 fitz MAE=3.6（方向一致）。run_checks.sh ✅：ruff 全清 + 195 passed（178+17 新）；两处安装目录 rsync 同步 diff -rq 一致；旧 BUG-044 源码字符串断言已更新为行为断言 |
 | CHK-033 | 检查 | 独立复核 [[BUG-058]]～[[BUG-062]]：源码对照 + 行为探针复现 + TestBugFix058_062 | 2026-08-07 22:25 | 2026-08-07 22:25 | 已完成 | 5 项源码修复均在位；独立探针 9/9 PASS（rotation=0、Song≠仿宋、nan/neg/inf→rc2、越界 SystemExit、filter 尾逗号行数一致）；TestBugFix058_062 17/17 passed；ruff 全清。说明：Cursor 沙箱下全量会因 test_cli_source_dir_copies_font 写 ~/Library/Fonts 失败（单独 unrestricted 通过），与 058-062 无关 |
+| CHK-034 | 检查 | 核对 tests/测试任务/basic-tests-readme.md 与实际 PDF / SKILL.md / e2e 结果一致性 | 2026-08-08 12:15 | 2026-08-08 12:15 | 已完成 | 发现：task001 源文件名与页规格过时；模式 D 缺 align_text/check_fonts/--preview-ink；task003/004 写 200dpi 与 SKILL「删除/移动用 300dpi或内嵌图」及已有 e2e（~2488×3496）不符；已由 [[DOC-016]] 修订 |
+| CHK-035 | 检查 | 复核依赖精简分析与 Python 版本结论（对照代码/磁盘占用/PyPI Requires-Python） | 2026-08-08 12:20 | 2026-08-08 12:20 | 已完成 | P1 删 reportlab 成立；P2「仅 telea 需 opencv」不成立（interpolate 边缘路径用 cv2.resize，且顶层 import cv2）；pypdfium2 包 448K+raw≈7M 仍建议保留；Python 代码硬下限实为 3.9+（check_fonts 无 future 的 dict[str]），非分析所述 3.8+；当前解析到的 PyMuPDF/Pillow/numpy 分别要求 3.10/3.10/3.11 |
+| CHK-036 | 检查 | 裁定 task003 skill 验证收尾：对照手动 task006/007 vs Skill 对比分析 + e2e | 2026-08-08 15:19 | 2026-08-08 15:19 | 已完成 | 结论：可告一段落。能力矩阵全覆盖；[[TST-022]] e2e 通过；像素布局 ±2px、未编辑区 0%；差异为策略选择（保留「2：」/分次精细移动）非缺口；行距自动测量/compound 多移动属后续增强。见 [[DOC-019]] |
 
 ## 测试数据
 
@@ -146,10 +151,12 @@
 | TST-014 | 开发 | TestBugFix033_035 + 测试收紧：倒置/零高 move(4)+parse_ordered_pair(2)+destination 点坐标(1)+evals contrast 合约(1)+dpi≤0(2)+单图空 rect 文档化(1)；BUG-027 非注释命令锁；BUG-028 ArgumentTypeError | 2026-08-06 12:41 | 2026-08-06 12:44 | 已完成 | 106 passed（95 原+约 11 新/收紧）；见 [[BUG-033]]..[[BUG-035]] [[CHK-021]] |
 | TST-015 | 开发 | TestBugFix036_047 新增 34 项回归测试：BUG-036 xref去重(1)+BUG-037 负坐标(3)+BUG-038 x越界(4)+BUG-039 越界verify(4)+BUG-040 donor/ref越界(3)+BUG-041 尺寸/异常(2)+BUG-042 源码锁(1)+BUG-043 单候选(1)+BUG-044 大小写(1)+BUG-045 halo退化(1)+BUG-046 feather/median/pdfium/CLI(11)+BUG-047 trigger description(2)；并修正 BUG-013 歧义测试改用不同图 | 2026-08-07 11:00 | 2026-08-07 11:20 | 已完成 | 140 passed（106 原+34 新）；ruff 全清；run_checks.sh ✅；evals 17/17；见 [[BUG-036]]..[[BUG-047]] [[CHK-023]] |
 | TST-016 | 开发 | TestBugFix048_051 新增 19 项回归测试：BUG-048 replace_pdf_image try/finally源码锁+负页码+越界页码+合法页码(4)+BUG-049 pymupdf try/finally源码锁+越界页码+合法页码(3)+BUG-050 parse_ref缺等号/坐标个数/负坐标/倒置框/合法值/CLI无traceback(6)+BUG-051 validate_box负坐标/倒置框/合法值/sample-only CLI/reference-box CLI/crop-box CLI(6) | 2026-08-07 12:30 | 2026-08-07 12:45 | 已完成 | 159 passed（140 原+19 新）；ruff 全清；run_checks.sh ✅；evals 17/17；见 [[BUG-048]]..[[BUG-051]] [[CHK-025]] |
-| TST-017 | 开发 | tests/测试任务/basic-test-readme.md：task001/task002 集成测试说明（在「田甜」后加「（实习律师）」，保持字体字号扫描效果一致） | 2026-08-07 19:35 | 2026-08-07 19:35 | 已完成 | 描述模式 D 完整操作步骤（渲染->字体->字号->取样->融合->微调->封装）；两任务须各自独立识别字体 |
+| TST-017 | 开发 | tests/测试任务/basic-tests-readme.md：task001/task002 集成测试说明（在「田甜」后加「（实习律师）」，保持字体字号扫描效果一致） | 2026-08-07 19:35 | 2026-08-07 19:35 | 已完成 | 描述模式 D 完整操作步骤（渲染->字体->字号->取样->融合->微调->封装）；两任务须各自独立识别字体 |
 | TST-018 | 开发 | 端到端测试 task001/task002：调用 skill 完整流程（渲染->OCR定位->字体->字号->取样->融合->封装）在「田甜」后加「（实习律师）」；用户替换 task001 PDF 后重跑；并与期望效果对比 | 2026-08-07 19:27 | 2026-08-07 21:00 | 已完成 | task001: Hiragino Sans GB W6 30px，差异 0.6✅；task002: Songti SC 28px，差异 3.6✅；PDF 打包用 fitz page.replace_image（task001 需旋转图片回 landscape）；发现 [[BUG-052]] [[BUG-053]]。期望效果对比（[[CHK-027]]）：task001 全页一致率 99.90%，新增文字墨色差 1.6（评分 A）；task002 全页一致率 99.92%，新增文字墨色差 8.1、暗像素多 99%（评分 B-，ink-color 调过头偏浓） |
 | TST-019 | 开发 | 改进后 skill 端到端复测 task001/task002：使用 align_text.py + --preview-ink + 密度交叉验证 + BUG-052/053 修复后的完整流程重跑 | 2026-08-07 20:30 | 2026-08-07 20:45 | 已完成 | task001（0003）: 墨迹均值差 0.6->0.1（83%提升），一次通过，全页一致率 99.89%；task002（0004）: 墨迹均值差 3.6->0.8（78%提升），迭代 3->0（BUG-053 修复后一次通过），全页一致率 99.89%，y重心差 1.9px；密度交叉验证检测到 task002 密度比 2.11x（仿宋未安装，已知限制）；见 [[PLN-003]] [[TST-018]] [[BUG-052]] [[BUG-053]] |
 | TST-020 | 开发 | TestBugFix058_062 新增 17 项回归测试：BUG-058 旋转源码锁+Rotate270内容朝向+Rotate90内容朝向(3)+BUG-059 Song不匹配FangSong+token精确+_name_tokens辅助(3)+BUG-060 nan/负数/inf CLI(3)+BUG-061 validate_box越界/界内/可选/crop CLI/align parse_box(5)+BUG-062 check_all语义+CLI尾逗号+纯逗号(3) | 2026-08-07 21:56 | 2026-08-07 21:56 | 已完成 | 195 passed（178 原+17 新）；ruff 全清；run_checks.sh ✅；旧 BUG-044 源码字符串断言更新为行为断言；见 [[BUG-058]]..[[BUG-062]] [[CHK-032]] |
+| TST-021 | 开发 | tests/测试任务/basic-tests-readme.md：task003 集成测试说明（删除两段文字 + 乙方信息块上移两行 +（四）条款上移一行） | 2026-08-08 11:30 | 2026-08-08 14:35 | 已完成 | task003 重定义：删除段一（如依据…则）+段二（若国家…费用。）两个文本段；乙方信息块上移两行、（四）条款上移一行；task004 已删除；描述模式 A+模式 B×2 完整操作步骤 |
+| TST-022 | 开发 | 端到端测试 task003：删除两段文字 + 保留文字上移到2:之后 + 乙方信息块上移两行 +（四）条款上移一行 | 2026-08-08 12:20 | 2026-08-08 15:05 | 已完成 | V2 e2e（0003）：5 删除框 interpolate 全清；保留文字「甲方需在收到…」上移 78px 到「2：」之后合并为一句；Block1 上移 158px、Block2 上移 79px 均 100% 匹配；「2：」标签/未编辑区 0% 变化；PDF 597×839 pt 1 页 |
 
 ## 文档维护
 
@@ -169,6 +176,11 @@
 | DOC-012 | 文档 | VERSION 约定改为只记版本号（`V0.1.2`），不再含 Build/日期；同步 CHANGELOG 格式说明与根 README 结构注释 | 2026-08-07 11:30 | 2026-08-07 11:30 | 已完成 | Build/日期仅保留在 CHANGELOG 发布条目标题 |
 | DOC-013 | 文档 | 端到端测试问题分析与复盘文档：记录 task001 垂直未对齐、task002 字体识别错误等 5 个问题，提出 5 项 skill 改进方案及实施细节 | 2026-08-07 21:00 | 2026-08-07 21:30 | 已完成 | 文件 design/plans/测试问题分析和复盘-2608.md；含问题数据、根因分析、改进方案、优先级排序；见 [[PLN-003]] [[CHK-027]] |
 | DOC-014 | 文档 | 修订复盘文档：同步 BUG-052/053 与改进 1～5 落地状态；统一 vs 原文/期望口径；补充评分标准、验收标准、问题 6 封装朝向；2c 标远期 Spike；保留原方案细节不删减 | 2026-08-07 20:27 | 2026-08-07 20:30 | 已完成 | 同文件 design/plans/测试问题分析和复盘-2608.md；见 [[DOC-013]] [[PLN-003]] |
+| DOC-015 | 文档 | 版本升至 V0.1.3：VERSION/CHANGELOG/SKILL.md 版本号同步；CHANGELOG 补充 V0.1.3-Build0283-20260808 完整条目（PLN-003 新工具、BUG-052～062 修复、结构调整、195 测试） | 2026-08-08 12:00 | 2026-08-08 12:00 | 已完成 | 修复 V0.1.3 commit 未同步版本号的问题；CHANGELOG 原"V0.1.2 后续增量"节替换为正式 V0.1.3 节 |
+| DOC-016 | 文档 | 修订 tests/测试任务/basic-tests-readme.md：对齐实际 PDF、SKILL 模式 D 全流程、删除/移动 300dpi | 2026-08-08 12:16 | 2026-08-08 12:16 | 已完成 | 修正 task001 文件名与 Rotate270 规格；补 check_fonts/align_text/--preview-ink/package；task003/004 改为 300dpi或内嵌图；注明 tests/results/ 产物约定；见 [[CHK-034]] |
+| DOC-017 | 文档 | 版本升至 V0.1.4：去掉 ReportLab、声明 Python 3.10+；同步 VERSION/CHANGELOG/README/SKILL | 2026-08-08 12:25 | 2026-08-08 12:25 | 已完成 | 见 [[OPT-004]] [[ADJ-009]]；opencv 仍必装 |
+| DOC-018 | 文档 | 修订 basic-tests-readme.md：task003 重定义（删除两段文字+三次移动）、删除 task004 | 2026-08-08 14:30 | 2026-08-08 15:00 | 已完成 | task003：删除段一+段二；保留文字上移一行到「2：」之后；乙方信息块上移两行；（四）条款上移一行；task004 整节删除；通用注意事项更新为三任务；见 [[TST-021]] |
+| DOC-019 | 文档 | 删除移动项目对比分析：原始手动脚本（task006+task007）vs Skill V0.1.4 逐函数算法对比 | 2026-08-08 15:10 | 2026-08-08 15:30 | 已完成 | 文件 design/plans/删除移动项目对比分析-2608.md；六节结构（项目全景→算法对比→策略对比→像素对比→能力矩阵→结论）；结论：Skill 完全覆盖手动脚本全部能力；与 [[原始项目对比分析-2608]]（增加文字路线）互补 |
 
 ## 功能开发
 
@@ -194,6 +206,7 @@
 | OPS-006 | 运维 | .gitignore 增补 tests/测试任务/ 忽略规则（大体积测试 PDF 固件，非源码） | 2026-08-07 19:30 | 2026-08-07 19:30 | 已完成 | git check-ignore 验证规则生效；见 [[CHK-016]] [[OPS-005]] |
 | OPS-007 | 运维 | .gitignore 增补 tests/results/ 忽略规则；CLAUDE.md 增加端到端测试结果目录说明（文件名格式 yyyymmdd-xxxx-测试事由） | 2026-08-07 19:40 | 2026-08-07 19:40 | 已完成 | git check-ignore 验证规则生效；CLAUDE.md 新增「端到端测试结果目录」节 |
 | OPS-008 | 运维 | .gitignore 增补 tests/期望效果/ 忽略规则 | 2026-08-07 19:50 | 2026-08-07 19:50 | 已完成 | git check-ignore 验证规则生效；见 [[CHK-016]] [[OPS-005]] |
+| OPS-009 | 运维 | 将 scanned-pdf-editor skill 安装到用户级 Claude Code / Codex / Cursor 三处 | 2026-08-08 11:52 | 2026-08-08 11:52 | 已完成 | 三处各 16 文件，SKILL.md md5 与源一致，已排除 .pytest_cache/.ruff_cache；安装路径 ~/.claude/skills、~/.codex/skills、~/.cursor/skills |
 
 ## 规划事项
 
@@ -210,7 +223,7 @@
 | OPT-001 | 优化 | stroke_shoulder / core_alpha_scale 参数化设计：默认值保持 add 模式 bit-exact 复现，替换后备可显式开启 | 2026-08-05 19:21 | 2026-08-05 19:21 | 已完成 | 避免破坏 seed=20260701 已验证输出；见 [[ADJ-001]] [[BUG-001]] |
 | OPT-002 | 优化 | 精简 SKILL.md frontmatter description，只保留触发条件，避免把完整工作流写进描述导致模型跳过正文 | 2026-08-05 20:01 | 2026-08-05 20:11 | 已完成 | description 由约 320 字精简到约 126 字，只留触发条件+授权边界；四模式实现细节仍在正文 |
 | OPT-003 | 优化 | 清理 ruff 静态检查问题并把静态检查纳入回归门禁 | 2026-08-05 20:53 | 2026-08-06 00:59 | 已完成 | 清理全部 18 项（E401/E701/E702/F401/F841/E402）；新增 scripts/run_checks.sh（ruff + pytest 回归门禁）；requirements.txt 加 ruff>=0.6；README 文件结构与自测节同步；ruff check . → All checks passed，58 passed |
-
+| OPT-004 | 优化 | 依赖精简 P1：移除 reportlab（~8.6M）；明确运行环境 Python 3.10+；opencv 暂不改可选 | 2026-08-08 12:21 | 2026-08-08 12:25 | 已完成 | 见 [[ADJ-009]] [[DOC-017]] [[CHK-035]]；版本 V0.1.4 |
 ## 调研事项
 
 | ID | 动作 | 事项 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -225,11 +238,11 @@
 | 代码 Bug | 62 | 62 | 0 | 100% |
 | 调整事项 | 8 | 8 | 0 | 100% |
 | 检查事项 | 33 | 33 | 0 | 100% |
-| 测试数据 | 20 | 20 | 0 | 100% |
+| 测试数据 | 21 | 21 | 0 | 100% |
 | 文档维护 | 14 | 14 | 0 | 100% |
 | 功能开发 | 7 | 7 | 0 | 100% |
-| 配置运维 | 8 | 8 | 0 | 100% |
+| 配置运维 | 9 | 9 | 0 | 100% |
 | 规划事项 | 3 | 3 | 0 | 100% |
 | 优化事项 | 3 | 3 | 0 | 100% |
 | 调研事项 | 2 | 2 | 0 | 100% |
-| **总计** | 160 | 160 | 0 | 100% |
+| **总计** | 162 | 162 | 0 | 100% |

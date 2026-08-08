@@ -1,6 +1,6 @@
 # skills-scanned-pdf-editor
 
-**Version: V0.1.2** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
+**Version: V0.1.4** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
 
 [English](#english) | [中文](#中文)
 
@@ -50,7 +50,7 @@ Two technical routes share the same goal (“looks like the original scan”):
 ```
 .
 ├── README.md                 # This file (repo overview)
-├── VERSION                   # Current version (V0.1.2)
+├── VERSION                   # Current version (V0.1.4)
 ├── CHANGELOG.md              # Release notes
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Session conventions for agents
@@ -88,7 +88,7 @@ cd skills/scanned-pdf-editor/scripts
 pip3 install -r requirements.txt
 ```
 
-Core stack: OpenCV, Pillow, NumPy, pypdfium2, PyMuPDF, ReportLab (`pytest` / `ruff` for checks).
+Requires **Python 3.10+**. Core stack: OpenCV, Pillow, NumPy, pypdfium2, PyMuPDF (`pytest` / `ruff` for checks).
 
 ### CLI overview
 
@@ -215,7 +215,7 @@ cd skills/scanned-pdf-editor/scripts
 ```
 .
 ├── README.md                 # 本文件（仓库总览）
-├── VERSION                   # 当前版本号（V0.1.2）
+├── VERSION                   # 当前版本号（V0.1.4）
 ├── CHANGELOG.md              # 版本说明
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Agent 会话约定
@@ -250,7 +250,7 @@ cd skills/scanned-pdf-editor/scripts
 pip3 install -r requirements.txt
 ```
 
-核心依赖：OpenCV、Pillow、NumPy、pypdfium2、PyMuPDF、ReportLab（检查用 `pytest` / `ruff`）。
+需要 **Python 3.10+**。核心依赖：OpenCV、Pillow、NumPy、pypdfium2、PyMuPDF（检查用 `pytest` / `ruff`）。
 
 ### CLI 概览
 

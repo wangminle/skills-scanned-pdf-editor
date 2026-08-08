@@ -1210,11 +1210,31 @@ class TestBugFix028_032(unittest.TestCase):
             )
 
     def test_save_pdf_valid_page_size_works(self):
+        import fitz
         from PIL import Image as PI
         img = PI.new("RGB", (100, 100), (200, 200, 200))
         out = Path(self.tmpdir) / "ok.pdf"
         utils.save_image_as_pdf(img, out, page_size=(595.2, 841.68), title="t", subject="s")
         self.assertTrue(out.exists())
+        doc = fitz.open(out)
+        try:
+            self.assertEqual(len(doc), 1)
+            rect = doc[0].rect
+            self.assertAlmostEqual(rect.width, 595.2, places=1)
+            self.assertAlmostEqual(rect.height, 841.68, places=1)
+            meta = doc.metadata
+            self.assertEqual(meta.get("title"), "t")
+            self.assertEqual(meta.get("subject"), "s")
+            self.assertTrue(doc[0].get_images())
+        finally:
+            doc.close()
+
+    def test_save_image_as_pdf_does_not_require_reportlab(self):
+        """新建 PDF 路径不得再依赖 reportlab。"""
+        import scan_edit_utils as mod
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("reportlab", src)
+        self.assertNotIn("ImageReader", src)
 
     # ── BUG-031：smooth_noise 1×1 归一化除零产生 NaN ──
 
@@ -2046,20 +2066,6 @@ class TestBugFix052_053(unittest.TestCase):
 
     # ── BUG-052/058: render_pdf_page 旋转 ──
 
-    def test_render_pdf_page_no_double_rotation(self):
-        """render_pdf_page 不应盲传 get_rotation() 给 render()。
-
-        PDFium 的 render(rotation=0) 内部已自动应用页面 /Rotate，
-        rotation 参数是附加旋转——传 get_rotation() 会双重旋转（BUG-058）。
-        """
-        import inspect
-        src = inspect.getsource(utils.render_pdf_page)
-        self.assertIn("rotation=0", src,
-                       "render 应传 rotation=0（让 PDFium 内部处理 /Rotate），"
-                       "而非 rotation=get_rotation()（双重旋转，BUG-058）")
-        self.assertNotIn("rotation=rotation", src,
-                         "不应把 get_rotation() 的返回值作为附加旋转传入")
-
     def test_render_pdf_page_applies_rotation(self):
         """带 /Rotate 标记的 PDF 渲染后内容朝向应正确。
 
@@ -2364,7 +2370,6 @@ class TestCheckFonts(unittest.TestCase):
     def test_cli_source_dir_copies_font(self):
         """--source-dir 找到字体文件时应复制到目标目录。"""
         import check_fonts
-        import shutil
         # 创建临时源目录，放入一个假字体文件
         src_dir = Path(tempfile.mkdtemp())
         font_file = src_dir / "simfang.ttf"
@@ -2477,7 +2482,6 @@ class TestBugFix058_062(unittest.TestCase):
 
         模拟全部字体已安装，验证 'Song' 匹配到 Songti 而非仿宋。
         """
-        import importlib
         orig_resolve = font_registry.resolve_font
         font_registry.resolve_font = lambda fn: f"/mock/{fn}"
         try:
@@ -2491,7 +2495,6 @@ class TestBugFix058_062(unittest.TestCase):
 
     def test_find_font_token_matching_precise(self):
         """token 级匹配：精确名/文件名命中正确字体。"""
-        import importlib
         orig_resolve = font_registry.resolve_font
         font_registry.resolve_font = lambda fn: f"/mock/{fn}"
         try:
@@ -2519,7 +2522,6 @@ class TestBugFix058_062(unittest.TestCase):
 
     def test_fusion_strength_nan_rejected(self):
         """--fusion-strength nan 应被 parser.error 拒绝（退出码 2），不产出全黑图。"""
-        import scan_text_fusion as stf
         img_path = Path(self.tmpdir) / "s.png"
         Image.new("RGB", (200, 200), (200, 200, 200)).save(img_path)
         import subprocess
@@ -2602,7 +2604,6 @@ class TestBugFix058_062(unittest.TestCase):
 
     def test_align_parse_box_rejects_out_of_bounds(self):
         """align_text parse_box 给出 image_size 时拒绝越界框。"""
-        import importlib
         import align_text
         with self.assertRaises(SystemExit):
             align_text.parse_box("10,10,200,200", image_size=(100, 100))
@@ -2642,8 +2643,8 @@ class TestBugFix058_062(unittest.TestCase):
         self.assertEqual(completed_clean.returncode, 0)
         self.assertEqual(completed_trailing.returncode, 0)
         # 两者的输出（字体列表行数）应该相同——尾逗号不应导致列出更多字体
-        clean_lines = [l for l in completed_clean.stdout.splitlines() if "✅" in l or "❌" in l]
-        trailing_lines = [l for l in completed_trailing.stdout.splitlines() if "✅" in l or "❌" in l]
+        clean_lines = [line for line in completed_clean.stdout.splitlines() if "✅" in line or "❌" in line]
+        trailing_lines = [line for line in completed_trailing.stdout.splitlines() if "✅" in line or "❌" in line]
         self.assertEqual(len(clean_lines), len(trailing_lines),
                          f"尾逗号不应改变过滤结果: clean={len(clean_lines)}, trailing={len(trailing_lines)}")
 
@@ -2659,7 +2660,7 @@ class TestBugFix058_062(unittest.TestCase):
         # 这是合理的：纯逗号=无有效过滤词=不过滤
         # 关键是 ',' 不应产生 ["", ""] 导致特殊行为
         # 只要不崩溃且退出码 0 即可
-        font_lines = [l for l in completed.stdout.splitlines() if "✅" in l or "❌" in l]
+        font_lines = [line for line in completed.stdout.splitlines() if "✅" in line or "❌" in line]
         self.assertGreater(len(font_lines), 0, "纯逗号应退化为列出全部")
 
 
