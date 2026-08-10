@@ -109,30 +109,64 @@ def _name_tokens(name: str) -> list[str]:
 def find_font(spec: str | None) -> tuple[str, int] | None:
     """把用户给的 --font 解析成 (路径, 索引)。
 
-    支持三种写法：完整路径、注册名（如 '仿宋'/'宋体'，token 匹配）、纯文件名。
+    支持三种写法：完整路径、注册名（如 '仿宋'/'宋体'/'Hiragino Sans GB W6'）、纯文件名。
     找不到返回 None。
 
-    匹配规则（BUG-059）：旧实现用 ``spec in name`` 裸子串匹配，过宽——
-    'Song' 会命中 'FangSong'（仿宋），'SC' 命中 'Songti SC'，'GB' 命中
-    'Hiragino Sans GB'。改为 token 级匹配：注册名拆成语义段（仿宋/FangSong/
-    Songti/SC），用户输入须**精确等于**某 token 或是其前缀，而非任意子串。
-    中文同理：'宋' 不应命中 '仿宋'（'宋' 只是 token '仿宋' 的后缀，不是前缀）。
+    匹配优先级（BUG-063 / BUG-059）：
+    1. 完整注册名精确匹配（大小写不敏感）——identify_font 输出可直接回填；
+    2. 多词 token 全集匹配——查询词全部出现在注册名 token 中，取覆盖最完整者
+       （区分 W3/W6，避免共享前缀误命中）；
+    3. 文件名精确/词干匹配；
+    4. 单词 token 精确或前缀匹配（≥2 字符）。旧实现用 ``spec in name`` 裸子串
+       过宽（'Song'→仿宋），故单词路径仍禁止任意子串。
     """
     if not spec:
         return None
     if os.path.exists(spec):
         return (spec, 0)
-    spec_l = spec.lower()
+    spec_l = spec.lower().strip()
+    if not spec_l:
+        return None
+
+    # 1) 完整注册名精确匹配（identify_font 「=> 最优: …」可直接回填）
+    for name, (fn, idx) in CJK_FONTS.items():
+        if spec_l == name.lower():
+            p = resolve_font(fn)
+            if p:
+                return (p, idx)
+
+    # 2) 多词查询：要求查询侧每个 token 都能在注册名 token 中精确命中
+    query_tokens = [t for t in _name_tokens(spec_l) if t]
+    # 对无括号的纯查询串，_name_tokens 仍按空格拆分
+    if not query_tokens:
+        query_tokens = [t for t in spec_l.replace(",", " ").split() if t]
+    if len(query_tokens) >= 2:
+        best: tuple[str, int] | None = None
+        best_score = -1
+        for name, (fn, idx) in CJK_FONTS.items():
+            name_tokens = _name_tokens(name)
+            if not name_tokens:
+                continue
+            if not all(qt in name_tokens for qt in query_tokens):
+                continue
+            # 覆盖分：查询 token 全中 + 注册名越短（更具体）越好
+            score = len(query_tokens) * 100 - len(name_tokens)
+            if score > best_score:
+                p = resolve_font(fn)
+                if p:
+                    best = (p, idx)
+                    best_score = score
+        if best is not None:
+            return best
+
+    # 3) 文件名 / 4) 单词 token
     for name, (fn, idx) in CJK_FONTS.items():
         matched = False
-        # 文件名精确匹配（允许不带后缀，如 'simfang' 匹配 'simfang.ttf'）
         fn_lower = fn.lower()
         fn_stem = fn_lower.rsplit(".", 1)[0] if "." in fn_lower else fn_lower
         if spec_l == fn_lower or spec_l == fn_stem:
             matched = True
-        # token 匹配：用户输入须精确等于某 token 或是其前缀（≥2 字符）
-        # 中文也走此路径：'宋' 不是 '仿宋' 的前缀（是后缀），不会误命中
-        if not matched:
+        if not matched and len(query_tokens) == 1:
             for token in _name_tokens(name):
                 if spec_l == token or (len(spec_l) >= 2 and token.startswith(spec_l)):
                     matched = True

@@ -1,6 +1,6 @@
 # skills-scanned-pdf-editor
 
-**Version: V0.1.4** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
+**Version: V0.1.5** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
 
 [English](#english) | [中文](#中文)
 
@@ -50,7 +50,7 @@ Two technical routes share the same goal (“looks like the original scan”):
 ```
 .
 ├── README.md                 # This file (repo overview)
-├── VERSION                   # Current version (V0.1.4)
+├── VERSION                   # Current version (V0.1.5)
 ├── CHANGELOG.md              # Release notes
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Session conventions for agents
@@ -152,7 +152,9 @@ Scripts under `scripts/` are importable modules—there is no separate packaged 
 | `check_fonts.py` | CJK font installation status & setup guide |
 | `identify_font.py` / `identify_size.py` | Measurement CLIs |
 | `align_text.py` | Vertical ink-center alignment for added text |
+| `locate_content.py` | Line-band / glyph / donor candidate localization |
 | `verify_outputs.py` | JSON-driven verification |
+| `sync_install.sh` | Mirror skill into `~/.agents` / `~/.claude` skills dirs |
 
 Prefer calling the CLIs from agents; import helpers only when embedding in your own pipeline.
 
@@ -160,10 +162,10 @@ Prefer calling the CLIs from agents; import helpers only when embedding in your 
 
 ```bash
 cd skills/scanned-pdf-editor/scripts
-./run_checks.sh          # ruff + pytest (run from repo root: ../../tests/scripts/test_skill.py)
+./run_checks.sh          # version sync check + ruff + unit + e2e
 ```
 
-`run_checks.sh` runs `ruff check` across the skill plus the pytest suite located at `tests/scripts/test_skill.py` (in the repo root, not shipped with the skill). End-to-end verification of edited PDFs uses `verify_outputs.py` with a JSON config (see the skill README).
+`run_checks.sh` runs version consistency (repo `VERSION` vs `SKILL.md` vs install copies), `ruff check`, unit tests (`tests/scripts/test_skill.py`), and basic-tasks e2e (`tests/scripts/test_e2e_basic_tasks.py`). After pulling, run `bash scripts/sync_install.sh` if install copies drift.
 
 ### License
 
@@ -215,7 +217,7 @@ cd skills/scanned-pdf-editor/scripts
 ```
 .
 ├── README.md                 # 本文件（仓库总览）
-├── VERSION                   # 当前版本号（V0.1.4）
+├── VERSION                   # 当前版本号（V0.1.5）
 ├── CHANGELOG.md              # 版本说明
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Agent 会话约定
@@ -306,7 +308,9 @@ python3 scripts/verify_outputs.py --config verify_config.example.json --reproduc
 | `check_fonts.py` | CJK 字体安装检查与安装引导 |
 | `identify_font.py` / `identify_size.py` | 测量 CLI |
 | `align_text.py` | 新增文字垂直墨迹中心对齐 |
+| `locate_content.py` | 行带 / 字框 / 供体候选定位 |
 | `verify_outputs.py` | JSON 驱动验证 |
+| `sync_install.sh` | 同步技能到 `~/.agents` / `~/.claude` |
 
 Agent 场景优先调 CLI；嵌入自有管线时再 import 工具函数。
 

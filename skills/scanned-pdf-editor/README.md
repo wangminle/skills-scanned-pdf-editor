@@ -1,6 +1,6 @@
 # scanned-pdf-editor
 
-**版本：V0.1.4**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
+**版本：V0.1.5**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
 
 扫描版 PDF / 扫描件图片的局部编辑技能：删除指定内容、移动正文位置、替换已有文字、补录新增文字，
 使修改区域的像素与原扫描件的字体、字号、墨色、纸纹、扫描噪点风格一致。
@@ -85,8 +85,10 @@ scripts/
   scan_edit_utils.py          共用工具（渲染、蒙版、修补、移动、替换、差分、验证）
   scan_edit_ops.py            统一 CLI：删除/移动/替换/封装/验证
   scan_text_fusion.py         扫描融合 + 蓝灰晕染（增加文字路线）
+  locate_content.py           行带 / 字框 / 供体候选定位
   verify_outputs.py           泛化验证框架（JSON 配置驱动）
-  run_checks.sh               回归门禁（ruff + pytest）
+  run_checks.sh               回归门禁（版本同步 + ruff + pytest + 可选 e2e）
+  sync_install.sh             同步技能到 ~/.agents / ~/.claude 安装目录
   requirements.txt            Python 依赖
 references/
   pipeline_methodology.md     方法论参考（原理、视觉判断、参数安全范围）

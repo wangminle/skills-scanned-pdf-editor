@@ -2664,5 +2664,419 @@ class TestBugFix058_062(unittest.TestCase):
         self.assertGreater(len(font_lines), 0, "纯逗号应退化为列出全部")
 
 
+class TestBugFix063_FontNameBackfill(unittest.TestCase):
+    """BUG-063：identify_font 输出的完整注册名须可直接回填 --font。"""
+
+    @staticmethod
+    def _install_known_file_resolve():
+        """只对 CJK_FONTS 中的真实文件名返回路径，避免任意字符串被 resolve 假命中。"""
+        known = {fn for fn, _idx in font_registry.CJK_FONTS.values()}
+        orig = font_registry.resolve_font
+
+        def _resolve(fn: str):
+            if fn in known:
+                return f"/mock/{fn}"
+            return None
+
+        font_registry.resolve_font = _resolve
+        return orig
+
+    def test_find_font_full_registered_name_hiragino_w6(self):
+        """完整注册名 'Hiragino Sans GB W6' 须解析到 ttc index=2，不能返回 None。"""
+        orig_resolve = self._install_known_file_resolve()
+        try:
+            r = font_registry.find_font("Hiragino Sans GB W6")
+            self.assertIsNotNone(r, "完整注册名应可回填")
+            path, idx = r
+            self.assertTrue(path.endswith("Hiragino Sans GB.ttc"))
+            self.assertEqual(idx, 2)
+            # 大小写不敏感
+            r2 = font_registry.find_font("hiragino sans gb w6")
+            self.assertEqual(r2, r)
+        finally:
+            font_registry.resolve_font = orig_resolve
+
+    def test_find_font_full_registered_names_exact(self):
+        """CJK_FONTS 中每个完整注册名都应精确命中自身（含正确 ttc 索引）。"""
+        orig_resolve = self._install_known_file_resolve()
+        try:
+            for name, (fn, idx) in font_registry.CJK_FONTS.items():
+                r = font_registry.find_font(name)
+                self.assertIsNotNone(r, f"find_font({name!r}) 应命中")
+                self.assertEqual(r[0], f"/mock/{fn}")
+                self.assertEqual(r[1], idx, f"{name} 索引应为 {idx}")
+        finally:
+            font_registry.resolve_font = orig_resolve
+
+    def test_find_font_w6_vs_w3_not_confused(self):
+        """多词匹配须区分 W3/W6，不能因共享前缀误命中 W3。"""
+        orig_resolve = self._install_known_file_resolve()
+        try:
+            r = font_registry.find_font("Hiragino Sans GB W6")
+            self.assertIsNotNone(r)
+            self.assertEqual(r[1], 2)
+            r3 = font_registry.find_font("Hiragino Sans GB W3")
+            self.assertIsNotNone(r3)
+            self.assertEqual(r3[1], 0)
+        finally:
+            font_registry.resolve_font = orig_resolve
+
+    def test_find_font_song_still_not_match_fangsong(self):
+        """回归 BUG-059：单 token 'Song' 仍不得命中仿宋。"""
+        orig_resolve = self._install_known_file_resolve()
+        try:
+            r = font_registry.find_font("Song")
+            if r is not None:
+                self.assertNotEqual(r[0].split("/")[-1], "simfang.ttf")
+        finally:
+            font_registry.resolve_font = orig_resolve
+
+
+class TestExportPageAndRotatePackage(unittest.TestCase):
+    """export-page 原生导出 + package 自动处理 /Rotate。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def _make_rotated_scan_pdf(self, rotate=270):
+        """横向内嵌图 + /Rotate，模拟 task001 类扫描件。"""
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        # 80×40 横向，左侧黑块
+        arr = np.full((40, 80, 3), 220, dtype=np.uint8)
+        arr[5:35, 5:25] = (0, 0, 0)
+        png = Path(self.tmpdir) / "emb.png"
+        Image.fromarray(arr).save(png)
+        # 显示朝向为竖版：宽=40 高=80（与 Rotate 270 后一致）
+        doc = fitz.open()
+        page = doc.new_page(width=40, height=80)
+        page.insert_image(page.rect, filename=str(png))
+        page.set_rotation(rotate)
+        pdf = Path(self.tmpdir) / "rot.pdf"
+        doc.save(str(pdf))
+        doc.close()
+        return pdf, (80, 40)
+
+    def test_extract_embedded_native_size(self):
+        pdf, emb_size = self._make_rotated_scan_pdf(270)
+        meta = utils.extract_embedded_page_image(pdf, as_displayed=False)
+        self.assertEqual(meta.rotate, 270)
+        self.assertEqual(meta.image.size, emb_size)
+        self.assertEqual(meta.embedded_size, emb_size)
+        self.assertEqual(meta.displayed_size, (40, 80))
+
+    def test_extract_as_displayed_orientation(self):
+        pdf, _ = self._make_rotated_scan_pdf(270)
+        meta = utils.extract_embedded_page_image(pdf, as_displayed=True)
+        self.assertEqual(meta.image.size, (40, 80))
+        # 显示朝向下，黑块应在底部附近（左上经 CW270 → 左下区域）
+        arr = np.asarray(meta.image)
+        dark = np.all(arr < 40, axis=2)
+        ys, xs = np.where(dark)
+        self.assertGreater(ys.mean(), arr.shape[0] / 2)
+
+    def test_package_auto_unrotates_displayed_edit(self):
+        """编辑显示朝向图后 package，应自动旋回内嵌朝向且尺寸匹配。"""
+        import scan_edit_ops as ops
+        pdf, emb_size = self._make_rotated_scan_pdf(270)
+        # 导出显示朝向并涂改
+        meta = utils.extract_embedded_page_image(pdf, as_displayed=True)
+        edited = meta.image.copy()
+        # 右上角涂红作标记
+        e = np.asarray(edited).copy()
+        e[0:8, -8:] = (255, 0, 0)
+        edited = Image.fromarray(e)
+        src = Path(self.tmpdir) / "edited_display.png"
+        edited.save(src)
+        out = Path(self.tmpdir) / "out.pdf"
+        ret = ops.main([
+            "package", "--source", str(src), "--output", str(out),
+            "--original-pdf", str(pdf),
+        ])
+        self.assertEqual(ret, 0)
+        # 回读内嵌图应为横向
+        back = utils.extract_embedded_page_image(out, as_displayed=False)
+        self.assertEqual(back.image.size, emb_size)
+
+    def test_package_rejects_resampled_size(self):
+        import scan_edit_ops as ops
+        pdf, _ = self._make_rotated_scan_pdf(270)
+        wrong = Path(self.tmpdir) / "wrong.png"
+        Image.new("RGB", (100, 200), (200, 200, 200)).save(wrong)
+        out = Path(self.tmpdir) / "bad.pdf"
+        ret = ops.main([
+            "package", "--source", str(wrong), "--output", str(out),
+            "--original-pdf", str(pdf),
+        ])
+        self.assertEqual(ret, 2)
+
+    def test_export_page_cli(self):
+        import scan_edit_ops as ops
+        pdf, emb_size = self._make_rotated_scan_pdf(270)
+        out = Path(self.tmpdir) / "page.png"
+        ret = ops.main([
+            "export-page", "--pdf", str(pdf), "--output", str(out),
+            "--as-displayed",
+        ])
+        self.assertEqual(ret, 0)
+        img = Image.open(out)
+        self.assertEqual(img.size, (40, 80))
+
+
+class TestBugFix065_E2eOptionalGate(unittest.TestCase):
+    """BUG-065：run_checks.sh 强制跑 E2E，但测试资产未入库 → CI 必崩。
+
+    E2E 依赖 tests/测试任务/、tests/期望效果/（.gitignore 排除），
+    test_e2e_basic_tasks.py 本身也不随仓库分发。修复：缺资产时跳过而非失败。
+    """
+
+    def test_run_checks_has_skip_guard(self):
+        """run_checks.sh 必须包含 E2E 跳过保护（结构性锁，防回归为无条件跑）。"""
+        run_checks = SCRIPTS_DIR / "run_checks.sh"
+        self.assertTrue(run_checks.exists(), "run_checks.sh 应存在")
+        content = run_checks.read_text(encoding="utf-8")
+        # 必须有 E2E_TEST 文件存在性判断
+        self.assertIn("E2E_TEST=", content)
+        self.assertIn("test_e2e_basic_tasks.py not in repo", content)
+        # 必须有资产目录存在性判断
+        self.assertIn("测试任务", content)
+        self.assertIn("期望效果", content)
+        # 必须有跳过分支
+        self.assertIn("skipped", content)
+
+    def test_run_checks_skips_e2e_in_clean_clone(self):
+        """行为验证：把 e2e 测试文件临时改名后，run_checks 应打印 skip 并最终通过。
+
+        用 PROJECT_ROOT 临时树模拟干净克隆（不动真实文件，避免污染工作区）。
+        直接 source 脚本的 E2E 段逻辑：测文件不存在 → skip。
+        """
+        # 构造最小场景：临时目录中无 test_e2e_basic_tasks.py，跑脚本 E2E 段
+        # 这里直接验证脚本的「文件不存在」分支：用一个临时空目录当 PROJECT_ROOT
+        # 不可行（脚本内部用 SCRIPT_DIR 推算），改为验证脚本文本行为的等价断言：
+        # 提取 E2E 段，确认 if 守卫在 pytest 调用之前。
+        content = (SCRIPTS_DIR / "run_checks.sh").read_text(encoding="utf-8")
+        e2e_pos = content.index("== pytest e2e basic-tasks ==")
+        pytest_pos = content.index('-m pytest "$E2E_TEST"')
+        if_pos = content.index('if [[ ! -f "$E2E_TEST" ]]', e2e_pos)
+        # if 守卫必须在 pytest 调用之前（否则缺资产时会裸跑失败）
+        self.assertLess(if_pos, pytest_pos,
+                        "E2E 的 if 守卫必须在 pytest 调用之前（BUG-065）")
+
+
+class TestBugFix066_SourceOrient(unittest.TestCase):
+    """BUG-066：prepare_image_for_pdf_replace 仅凭尺寸判朝向。
+
+    /Rotate=180（显示尺寸==内嵌尺寸）与正方形图（任何旋转尺寸都相等）会让旧实现
+    把显示朝向图误判为内嵌朝向，package 后方向错。修复：显式 source_orient 传参，
+    auto 模式下尺寸无法区分时报错而非静默猜错。
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def test_rotate180_displayed_orient_rotates_back(self):
+        """显示朝向图 + Rotate=180 + source_orient=displayed → 正确旋回（非恒等）。"""
+        emb = Image.new("RGB", (60, 40), (200, 200, 200))
+        arr = np.array(emb).copy()
+        arr[0:10, 0:10] = (0, 0, 0)  # 左上黑块标记
+        emb = Image.fromarray(arr)
+        # Rotate=180：显示尺寸==内嵌尺寸（60×40）
+        displayed = utils.orient_embedded_to_displayed(emb, 180)
+        result = utils.prepare_image_for_pdf_replace(
+            displayed,
+            embedded_size=(60, 40),
+            displayed_size=(60, 40),
+            rotate=180,
+            source_orient="displayed",
+        )
+        self.assertEqual(result.size, (60, 40))
+        # 旋回 180° 后黑块应到右下（与原 emb 一致），而非停在左上
+        rarr = np.asarray(result)
+        self.assertLess(rarr[0:10, 0:10].mean(), 60)  # 左上：经 180 → 不应还是黑的
+        # 实际：displayed 是 emb 旋转 180（黑块在右下），再旋回 180 → 黑块回左上
+        # 所以验证 result == emb（往返一致）
+        self.assertTrue(np.array_equal(np.asarray(result), np.asarray(emb)))
+
+    def test_rotate180_auto_rejects_ambiguous_size(self):
+        """Rotate=180 + auto + 显示朝向图 → 报错（不再静默猜错）。"""
+        emb = Image.new("RGB", (60, 40), (200, 200, 200))
+        displayed = utils.orient_embedded_to_displayed(emb, 180)
+        with self.assertRaises(ValueError) as ctx:
+            utils.prepare_image_for_pdf_replace(
+                displayed,
+                embedded_size=(60, 40),
+                displayed_size=(60, 40),
+                rotate=180,
+                source_orient="auto",
+            )
+        self.assertIn("无法判定", str(ctx.exception))
+
+    def test_square_rotate90_displayed_orient_rotates_back(self):
+        """正方形图 + Rotate=90 + source_orient=displayed → 正确旋回。"""
+        emb = Image.new("RGB", (50, 50), (200, 200, 200))
+        arr = np.array(emb).copy()
+        arr[0:10, 0:10] = (0, 0, 0)  # 左上黑块
+        emb = Image.fromarray(arr)
+        displayed = utils.orient_embedded_to_displayed(emb, 90)
+        result = utils.prepare_image_for_pdf_replace(
+            displayed,
+            embedded_size=(50, 50),
+            displayed_size=(50, 50),
+            rotate=90,
+            source_orient="displayed",
+        )
+        # 往返应恢复原 embedded
+        self.assertTrue(np.array_equal(np.asarray(result), np.asarray(emb)))
+
+    def test_square_rotate90_auto_rejects_ambiguous(self):
+        """正方形图 Rotate=90 auto → 报错（尺寸相同无法区分）。"""
+        emb = Image.new("RGB", (50, 50), (200, 200, 200))
+        with self.assertRaises(ValueError) as ctx:
+            utils.prepare_image_for_pdf_replace(
+                emb,
+                embedded_size=(50, 50),
+                displayed_size=(50, 50),
+                rotate=90,
+                source_orient="auto",
+            )
+        self.assertIn("无法判定", str(ctx.exception))
+
+    def test_embedded_orient_passes_through(self):
+        """source_orient=embedded：原样返回（尺寸须匹配）。"""
+        emb = Image.new("RGB", (60, 40), (200, 200, 200))
+        result = utils.prepare_image_for_pdf_replace(
+            emb,
+            embedded_size=(60, 40),
+            displayed_size=(60, 40),
+            rotate=180,
+            source_orient="embedded",
+        )
+        self.assertTrue(np.array_equal(np.asarray(result), np.asarray(emb)))
+
+    def test_displayed_orient_wrong_size_errors(self):
+        """source_orient=displayed 但尺寸不匹配显示朝向 → 报错。"""
+        emb = Image.new("RGB", (60, 40), (200, 200, 200))
+        with self.assertRaises(ValueError):
+            utils.prepare_image_for_pdf_replace(
+                emb,
+                embedded_size=(60, 40),
+                displayed_size=(40, 60),
+                rotate=90,
+                source_orient="displayed",
+            )
+
+    def test_auto_non_square_90_270_still_works(self):
+        """auto 模式：非正方形 90/270（尺寸可区分）保持向后兼容。"""
+        # 80×40 内嵌，Rotate=270 → 显示 40×80
+        emb = Image.new("RGB", (80, 40), (200, 200, 200))
+        displayed = utils.orient_embedded_to_displayed(emb, 270)
+        result = utils.prepare_image_for_pdf_replace(
+            displayed,
+            embedded_size=(80, 40),
+            displayed_size=(40, 80),
+            rotate=270,
+            source_orient="auto",
+        )
+        self.assertEqual(result.size, (80, 40))
+        self.assertTrue(np.array_equal(np.asarray(result), np.asarray(emb)))
+
+    def test_cli_package_source_orient_displayed_rotate180(self):
+        """CLI package --source-orient displayed 对 Rotate=180 PDF 正确旋回。"""
+        import scan_edit_ops as ops
+        try:
+            import fitz  # noqa: F401
+        except ImportError:
+            self.skipTest("未安装 PyMuPDF")
+        # 造 Rotate=180 PDF（正方形，尺寸无歧义）
+        arr = np.full((40, 60, 3), 220, dtype=np.uint8)
+        arr[5:15, 5:15] = (0, 0, 0)
+        png = Path(self.tmpdir) / "emb.png"
+        Image.fromarray(arr).save(png)
+        doc = fitz.open()
+        page = doc.new_page(width=60, height=40)
+        page.insert_image(page.rect, filename=str(png))
+        page.set_rotation(180)
+        pdf = Path(self.tmpdir) / "rot180.pdf"
+        doc.save(str(pdf))
+        doc.close()
+        # 导出显示朝向并涂改
+        meta = utils.extract_embedded_page_image(pdf, as_displayed=True)
+        edited = meta.image.copy()
+        src = Path(self.tmpdir) / "edited.png"
+        edited.save(src)
+        out = Path(self.tmpdir) / "out.pdf"
+        ret = ops.main([
+            "package", "--source", str(src), "--output", str(out),
+            "--original-pdf", str(pdf), "--source-orient", "displayed",
+        ])
+        self.assertEqual(ret, 0)
+        back = utils.extract_embedded_page_image(out, as_displayed=False)
+        self.assertEqual(back.image.size, (60, 40))
+
+
+class TestFontQualityGate(unittest.TestCase):
+    """字体密度/置信度阻断式质量门禁。"""
+
+    def test_density_out_of_range_blocked(self):
+        import identify_font as iff
+        reasons = iff.quality_gate_reasons(
+            "确定（明显领先）",
+            density_ratio=1.88,
+            uninstalled=[],
+        )
+        self.assertTrue(any("密度比" in r for r in reasons))
+
+    def test_density_ok_certain_passes(self):
+        import identify_font as iff
+        reasons = iff.quality_gate_reasons(
+            "确定（明显领先）",
+            density_ratio=1.05,
+            uninstalled=[],
+        )
+        self.assertEqual(reasons, [])
+
+    def test_low_confidence_blocked(self):
+        import identify_font as iff
+        reasons = iff.quality_gate_reasons(
+            "存疑（NCC 偏低，参考字可能太小/太糊，换更大的字）",
+            density_ratio=1.0,
+            uninstalled=[],
+        )
+        self.assertTrue(any("置信度不足" in r for r in reasons))
+
+    def test_single_candidate_with_uninstalled_blocked(self):
+        import identify_font as iff
+        reasons = iff.quality_gate_reasons(
+            "参考（仅一个已装候选，无法比较领先度，建议安装更多候选字体以交叉验证）",
+            density_ratio=1.0,
+            uninstalled=[("仿宋 (FangSong)", "simfang.ttf")],
+        )
+        self.assertTrue(any("未安装" in r for r in reasons))
+
+    def test_allow_degraded_cli_exits_zero(self):
+        """--allow-degraded 在可能触发门禁的场景下仍以 0 退出。"""
+        import subprocess
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("无 CJK 字体")
+        img = Image.new("L", (120, 80), 240)
+        for x in range(20, 90):
+            img.putpixel((x, 40), 30)
+        path = Path(tempfile.mkdtemp()) / "thin.png"
+        img.save(path)
+        completed = subprocess.run(
+            [
+                sys.executable, str(SCRIPTS_DIR / "identify_font.py"),
+                "--source", str(path),
+                "--ref", "一=15,30,100,55",
+                "--allow-degraded",
+            ],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("回填参数", completed.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

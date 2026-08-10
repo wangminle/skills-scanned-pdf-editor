@@ -220,6 +220,168 @@ def _select_page_image_xref(page, images: list, *, strict: bool = True) -> int:
     return best_xref
 
 
+@dataclass(frozen=True)
+class EmbeddedPageImage:
+    """PDF 页内嵌整页扫描图及其朝向元数据。"""
+
+    image: Image.Image
+    page_index: int
+    xref: int
+    rotate: int  # PDF /Rotate（顺时针，0/90/180/270）
+    embedded_size: tuple[int, int]  # 内嵌像素 (w, h)
+    displayed_size: tuple[int, int]  # 阅读器朝向像素 (w, h)
+
+
+def pdf_clockwise_to_pil_ccw(clockwise_deg: int) -> int:
+    """PDF /Rotate（顺时针）→ PIL Image.rotate（逆时针）角度。"""
+    return (360 - (int(clockwise_deg) % 360)) % 360
+
+
+def orient_embedded_to_displayed(image: Image.Image, rotate: int) -> Image.Image:
+    """把内嵌像素朝向转到阅读器显示朝向。"""
+    ccw = pdf_clockwise_to_pil_ccw(rotate)
+    if ccw == 0:
+        return image.copy()
+    return image.rotate(ccw, expand=True)
+
+
+def orient_displayed_to_embedded(image: Image.Image, rotate: int) -> Image.Image:
+    """把阅读器显示朝向转回内嵌像素朝向（package 回封前用）。"""
+    cw = int(rotate) % 360
+    if cw == 0:
+        return image.copy()
+    # 显示 = 内嵌顺时针 cw；逆变换 = 对显示图逆时针 cw（=PIL rotate cw）
+    return image.rotate(cw, expand=True)
+
+
+def extract_embedded_page_image(
+    pdf_path: Path,
+    *,
+    page_index: int = 0,
+    as_displayed: bool = False,
+    strict: bool = True,
+) -> EmbeddedPageImage:
+    """导出页面覆盖面积最大的内嵌整页图（原生像素，无重采样）。
+
+    ``as_displayed=True`` 时按 /Rotate 转到阅读器朝向，便于人工编辑；
+    ``package --original-pdf`` 会自动识别显示朝向并旋回内嵌朝向再替换。
+    """
+    import fitz
+
+    document = fitz.open(str(pdf_path))
+    try:
+        if not 0 <= page_index < len(document):
+            raise IndexError(f"页码越界: {page_index + 1}/{len(document)}")
+        page = document[page_index]
+        images = page.get_images(full=True)
+        if not images:
+            raise RuntimeError("页面中没有可导出的内嵌图像。")
+        xref = _select_page_image_xref(page, images, strict=strict)
+        rotate = int(page.rotation) % 360
+
+        pix = fitz.Pixmap(document, xref)
+        try:
+            work = pix
+            if work.n != 3 or work.alpha:
+                work = fitz.Pixmap(fitz.csRGB, work)
+            image = Image.frombytes("RGB", (work.width, work.height), work.samples)
+        finally:
+            del pix
+
+        embedded_size = (image.width, image.height)
+        displayed = orient_embedded_to_displayed(image, rotate)
+        displayed_size = (displayed.width, displayed.height)
+        out = displayed if as_displayed else image
+        return EmbeddedPageImage(
+            image=out.convert("RGB"),
+            page_index=page_index,
+            xref=xref,
+            rotate=rotate,
+            embedded_size=embedded_size,
+            displayed_size=displayed_size,
+        )
+    finally:
+        document.close()
+
+
+def prepare_image_for_pdf_replace(
+    image: Image.Image,
+    *,
+    embedded_size: tuple[int, int],
+    displayed_size: tuple[int, int],
+    rotate: int,
+    source_orient: str = "auto",
+) -> Image.Image:
+    """将编辑结果对齐到内嵌图尺寸与朝向，供 replace_pdf_image 使用。
+
+    ``source_orient`` 决定如何理解输入图朝向：
+
+    - ``"displayed"``：输入是阅读器显示朝向图（来自 ``export-page --as-displayed``）。
+      若 /Rotate≠0，无条件旋回内嵌朝向。尺寸仅用于校验合法性。
+    - ``"embedded"``：输入已是内嵌朝向，原样返回（尺寸须匹配）。
+    - ``"auto"``（默认，向后兼容）：按尺寸推断——仅在 /Rotate=90/270 且宽高互换
+      （displayed 尺寸 ≠ embedded 尺寸）时可可靠区分。当尺寸无法区分（/Rotate=180
+      或正方形图）时不再静默猜错，改为报错并提示显式指定朝向（BUG-066）。
+    """
+    w, h = image.size
+    ew, eh = embedded_size
+    dw, dh = displayed_size
+    rot = int(rotate) % 360
+
+    if source_orient == "displayed":
+        # 显示朝向：rotate≠0 时必须旋回；rotate==0 时显示==内嵌，原样返回
+        if rot == 0:
+            if (w, h) != (ew, eh):
+                raise ValueError(
+                    f"编辑图尺寸 {w}×{h} 与内嵌图 {ew}×{eh} 不匹配（/Rotate=0 显示即内嵌）。"
+                )
+            return image.convert("RGB")
+        if (w, h) != (dw, dh):
+            raise ValueError(
+                f"编辑图尺寸 {w}×{h} 与显示朝向 {dw}×{dh} 不匹配；"
+                "--source-orient=displayed 要求输入为 export-page --as-displayed 导出的显示朝向图。"
+            )
+        return orient_displayed_to_embedded(image.convert("RGB"), rot)
+
+    if source_orient == "embedded":
+        if (w, h) != (ew, eh):
+            raise ValueError(
+                f"编辑图尺寸 {w}×{h} 与内嵌图 {ew}×{eh} 不匹配（--source-orient=embedded）。"
+            )
+        return image.convert("RGB")
+
+    # auto：按尺寸推断
+    # /Rotate=0：显示==内嵌，朝向无歧义
+    if rot == 0:
+        if (w, h) == (ew, eh):
+            return image.convert("RGB")
+        raise ValueError(
+            f"编辑图尺寸 {w}×{h} 与内嵌图 {ew}×{eh} 均不匹配（/Rotate=0）；"
+            "请用 export-page 导出后编辑，避免对回渲图重采样回封。"
+        )
+
+    # /Rotate≠0 且 displayed 尺寸≠embedded 尺寸（典型 90/270 非正方形）：尺寸可区分
+    size_distinct = (ew, eh) != (dw, dh)
+    if size_distinct:
+        if (w, h) == (ew, eh):
+            return image.convert("RGB")
+        if (w, h) == (dw, dh):
+            return orient_displayed_to_embedded(image.convert("RGB"), rot)
+        raise ValueError(
+            f"编辑图尺寸 {w}×{h} 与内嵌图 {ew}×{eh}、显示朝向 {dw}×{dh} 均不匹配；"
+            "请用 export-page 导出内嵌/显示图后编辑，避免对回渲图重采样回封。"
+        )
+
+    # /Rotate≠0 但 displayed 尺寸==embedded 尺寸（/Rotate=180 或正方形 90/270）：
+    # 尺寸无法区分朝向，不再静默猜错（BUG-066）
+    raise ValueError(
+        f"/Rotate={rot} 但显示尺寸 {dw}×{dh} 与内嵌尺寸 {ew}×{eh} 相同，"
+        "尺寸无法判定输入图朝向。请显式指定："
+        "export-page --as-displayed 导出编辑后用 --source-orient displayed；"
+        "或编辑内嵌图后用 --source-orient embedded。"
+    )
+
+
 # ───────────────────────────── 基础像素工具 ─────────────────────────────
 
 

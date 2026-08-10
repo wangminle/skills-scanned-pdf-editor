@@ -10,8 +10,36 @@
 | `move` | 移动像素块并清理残留 |
 | `replace` | 原生供体替换 |
 | `compound` | 复合操作：复制源块→清除多个区域→粘贴源块到新位置 |
-| `package` | 将编辑后的图片封装为 PDF（新建或替换内嵌图） |
+| `package` | 将编辑后的图片封装为 PDF（新建或替换内嵌图；替换时按 `--source-orient` 处理 /Rotate 朝向） |
+| `export-page` | 导出页内嵌整页扫描图（原生像素；`--as-displayed` 按 /Rotate 转显示朝向） |
 | `verify` | 像素级验证（变化像素、外框、区外变化、空白行） |
+
+### export-page
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `--pdf` | 源 PDF | 必填 |
+| `--output` | 输出 PNG | 必填 |
+| `--page-index` | 页码（0-based） | 0 |
+| `--as-displayed` | 转到阅读器显示朝向 | off |
+
+### package（替换内嵌图模式重点参数）
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `--original-pdf` | 给出则替换该 PDF 内嵌图（保留 OCR）；不给则新建单页 PDF | 无 |
+| `--page-index` | 替换内嵌图的页码（0-based；越界报错） | 0 |
+| `--source-orient` | 输入图朝向：`auto`（按尺寸推断，仅 /Rotate 90/270 非正方形可靠）、`displayed`（`export-page --as-displayed` 导出的显示朝向图）、`embedded`（内嵌朝向）。**/Rotate=180 或正方形图尺寸无法区分朝向，`auto` 退出码 2，须显式指定**（BUG-066） | auto |
+| `--page-size` | 新建模式页面点尺寸 `W,H`（须两正数） | 按 `--dpi` 推算 |
+| `--dpi` | 新建模式推算页面尺寸的 dpi（须正整数） | 300 |
+
+## locate_content.py（行带 / 字框 / 供体定位）
+
+| 子命令 | 功能 |
+|---|---|
+| `lines` | 纵向墨迹投影检测行带 |
+| `glyphs` | 搜索区墨迹连通域 → 字级候选框 |
+| `donors` | 按参考框高宽容差搜索供体候选 |
 
 ## scan_text_fusion.py（增加文字）
 

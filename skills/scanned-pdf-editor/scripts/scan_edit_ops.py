@@ -354,13 +354,37 @@ def cmd_package(args: argparse.Namespace) -> int:
     """将编辑后的图片封装为 PDF。
 
     两种模式：
-    - --original-pdf 给出时：用 PyMuPDF replace_image 替换内嵌图，保留 OCR 文字层
+    - --original-pdf 给出时：用 PyMuPDF replace_image 替换内嵌图，保留 OCR 文字层；
+      若编辑图是阅读器显示朝向（与 /Rotate 后尺寸一致），自动旋回内嵌朝向再替换。
     - 不给 --original-pdf 时：用 PyMuPDF 按指定页面尺寸新建单页 PDF
     """
     from PIL import Image as PILImage
     image = PILImage.open(args.source).convert("RGB")
 
     if args.original_pdf:
+        meta = utils.extract_embedded_page_image(
+            Path(args.original_pdf),
+            page_index=args.page_index,
+            as_displayed=False,
+        )
+        try:
+            before = image.size
+            image = utils.prepare_image_for_pdf_replace(
+                image,
+                embedded_size=meta.embedded_size,
+                displayed_size=meta.displayed_size,
+                rotate=meta.rotate,
+                source_orient=args.source_orient,
+            )
+        except ValueError as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            return 2
+        if before != image.size:
+            print(
+                f"package: 已按 /Rotate={meta.rotate} 将显示朝向 "
+                f"{before[0]}×{before[1]} 旋回内嵌朝向 "
+                f"{image.width}×{image.height}"
+            )
         utils.replace_pdf_image(
             Path(args.original_pdf), args.output, image,
             page_index=args.page_index,
@@ -404,6 +428,29 @@ def cmd_package(args: argparse.Namespace) -> int:
         )
 
     print(f"saved: {args.output}")
+    return 0
+
+
+def cmd_export_page(args: argparse.Namespace) -> int:
+    """导出 PDF 页内嵌整页扫描图（原生像素，可选转到显示朝向）。"""
+    try:
+        meta = utils.extract_embedded_page_image(
+            Path(args.pdf),
+            page_index=args.page_index,
+            as_displayed=args.as_displayed,
+        )
+    except (IndexError, RuntimeError, ValueError) as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return 2
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    meta.image.save(args.output)
+    orient = "displayed" if args.as_displayed else "embedded"
+    print(
+        f"saved: {args.output}  ({meta.image.width}×{meta.image.height}, "
+        f"orient={orient}, /Rotate={meta.rotate}, "
+        f"embedded={meta.embedded_size[0]}×{meta.embedded_size[1]}, "
+        f"displayed={meta.displayed_size[0]}×{meta.displayed_size[1]})"
+    )
     return 0
 
 
@@ -503,9 +550,30 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--page-size", help="页面点尺寸 W,H（两个正数；不给则按 --dpi 从图像推算）")
     pp.add_argument("--dpi", type=int, default=300, help="推算页面尺寸用的 dpi（须为正整数，默认 300）")
     pp.add_argument("--page-index", type=int, default=0, help="替换内嵌图的页码（默认 0）")
+    pp.add_argument(
+        "--source-orient", choices=["auto", "embedded", "displayed"], default="auto",
+        help="输入图朝向：auto=按尺寸推断（默认）；displayed=export-page --as-displayed "
+             "导出的显示朝向图（编辑后回封，/Rotate≠0 时旋回）；embedded=内嵌朝向图。"
+             "/Rotate=180 或正方形图尺寸无法区分朝向，必须显式指定（BUG-066）。",
+    )
     pp.add_argument("--title", help="PDF 标题元数据")
     pp.add_argument("--subject", help="PDF 主题元数据")
     pp.set_defaults(func=cmd_package)
+
+    # export-page：导出内嵌整页图（避免回渲重采样）
+    px = sub.add_parser(
+        "export-page",
+        help="导出 PDF 页内嵌整页扫描图（原生像素；可选 --as-displayed 按 /Rotate 转显示朝向）",
+    )
+    px.add_argument("--pdf", type=Path, required=True, help="源 PDF 路径")
+    px.add_argument("--output", type=Path, required=True, help="输出 PNG 路径")
+    px.add_argument("--page-index", type=int, default=0, help="页码（默认 0）")
+    px.add_argument(
+        "--as-displayed",
+        action="store_true",
+        help="按 /Rotate 转到阅读器显示朝向（编辑后 package 会自动旋回）",
+    )
+    px.set_defaults(func=cmd_export_page)
 
     return p
 

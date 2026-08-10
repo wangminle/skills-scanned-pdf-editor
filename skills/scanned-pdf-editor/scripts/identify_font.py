@@ -37,6 +37,37 @@ resolve_font = font_registry.resolve_font
 HN = 48          # 高度归一化像素
 INK_THR = 160    # 取墨迹外接框用的阈值（偏高以捕获扫描模糊边缘全形）
 SIZES = [28, 30, 32, 34, 36, 40]
+DENSITY_RATIO_LOW = 0.67
+DENSITY_RATIO_HIGH = 1.5
+
+
+def quality_gate_reasons(
+    verdict: str,
+    *,
+    density_ratio: float | None,
+    uninstalled: list,
+    density_low: float = DENSITY_RATIO_LOW,
+    density_high: float = DENSITY_RATIO_HIGH,
+) -> list[str]:
+    """返回应阻断交付的原因列表；空列表表示可通过。
+
+    规则：
+    - 密度比超出 [low, high] → 阻断
+    - 非「确定」且非「仅一个已装候选」→ 阻断
+    - 「仅一个已装候选」且仍有未安装候选 → 阻断（目标字体可能缺失）
+    """
+    reasons: list[str] = []
+    if density_ratio is not None and not (density_low <= density_ratio <= density_high):
+        reasons.append(
+            f'密度比 {density_ratio:.2f} 超出 [{density_low}, {density_high}]'
+        )
+    certain = verdict.startswith('确定')
+    single_ref = verdict.startswith('参考（仅一个已装候选')
+    if not certain and not single_ref:
+        reasons.append(f'置信度不足（{verdict}）')
+    elif not certain and single_ref and uninstalled:
+        reasons.append('仅一个已装候选且存在未安装候选（目标字体可能缺失）')
+    return reasons
 
 
 def ink_bbox(gray, thr=INK_THR):
@@ -186,6 +217,11 @@ def main():
                     help='参考字及其框，可多次给出（推荐 2~4 个不同结构的字）')
     ap.add_argument('--candidates', default='',
                     help='逗号分隔覆盖默认候选。格式: 仿宋=simfang.ttf,宋体=simsun.ttc')
+    ap.add_argument(
+        '--allow-degraded',
+        action='store_true',
+        help='允许在密度偏差过大或置信度不足时仍以退出码 0 继续（默认阻断，退出码 3）',
+    )
     args = ap.parse_args()
 
     im = Image.open(args.source).convert('L')
@@ -275,6 +311,8 @@ def main():
     else:
         verdict = '存疑（NCC 偏低，参考字可能太小/太糊，换更大的字）'
     print(f'=> 最优: {top_name}   均分={avg:.3f}  领先第二名 {margin:.3f}  ({verdict})')
+    # BUG-063：完整注册名可直接回填 --font（经 font_registry.find_font 精确匹配）
+    print(f'回填参数: --font "{top_name}"')
 
     # ── 密度交叉验证 ──
     # NCC 对笔画粗细不敏感（均值归一化消去了亮度差异），但不同字体的
@@ -282,6 +320,7 @@ def main():
     # 若密度差异过大也应警告用户复核。
     # 典型案例: task002 原文为仿宋但本机未安装，Songti SC NCC 最高但每字
     # 暗像素数是原文的 2 倍（205 vs 103），合成字明显偏粗。
+    density_ratio = None
     top_fn, top_idx = cands[top_name]
     top_path = resolve_font(top_fn)
     if top_path:
@@ -293,23 +332,23 @@ def main():
                 rend_densities.append(rfp["density"])
         if ref_densities and rend_densities and (d_ref := sum(ref_densities) / len(ref_densities)) > 0.01:
             d_rend = sum(rend_densities) / len(rend_densities)
-            ratio = d_rend / d_ref
+            density_ratio = d_rend / d_ref
             print()
             print('── 密度交叉验证 ──')
             print(f'扫描件参考字平均密度: {d_ref:.3f}')
             print(f'{top_name} 渲染字平均密度: {d_rend:.3f}')
-            print(f'密度比 (渲染/原文): {ratio:.2f}')
-            if ratio > 1.5:
+            print(f'密度比 (渲染/原文): {density_ratio:.2f}')
+            if density_ratio > DENSITY_RATIO_HIGH:
                 print('⚠ 警告: 渲染字密度偏高（笔画偏粗），即使 NCC 得分最高，'
                       '笔画粗细可能与原文字体不符。')
                 print('  典型场景: 原文为仿宋但本机未安装，误判为宋体（宋体笔画更密）。')
                 print('  建议: 1) 安装更多候选字体后重跑；'
-                      '2) 用 scan_text_fusion 加字后做像素级对比验证。')
-            elif ratio < 0.67:
+                      '2) 接受降级结果时加 --allow-degraded。')
+            elif density_ratio < DENSITY_RATIO_LOW:
                 print('⚠ 警告: 渲染字密度偏低（笔画偏细），即使 NCC 得分最高，'
                       '笔画粗细可能与原文字体不符。')
                 print('  建议: 1) 安装更多候选字体后重跑；'
-                      '2) 用 scan_text_fusion 加字后做像素级对比验证。')
+                      '2) 接受降级结果时加 --allow-degraded。')
             else:
                 print('密度匹配良好。')
 
@@ -325,6 +364,25 @@ def main():
         print('若原文是公文/法律文书，正文常见仿宋（simfang.ttf）。'
               '安装对应字体后重跑：macOS 放入 ~/Library/Fonts 或 /Library/Fonts；'
               'Windows 放入 C:\\Windows\\Fonts。')
+
+    # ── 交付门禁（默认阻断；--allow-degraded 仅警告）──
+    gate_reasons = quality_gate_reasons(
+        verdict,
+        density_ratio=density_ratio,
+        uninstalled=uninstalled,
+    )
+    if gate_reasons:
+        print()
+        print('── 质量门禁 ──')
+        for reason in gate_reasons:
+            print(f'阻断原因: {reason}')
+        if args.allow_degraded:
+            print('已指定 --allow-degraded：允许降级继续，退出码 0。'
+                  '合成结果可能明显偏粗/偏细，请人工验收。')
+        else:
+            print('默认拒绝继续加字。请安装正确字体后重跑，或显式传入 '
+                  '--allow-degraded 接受降级结果。')
+            sys.exit(3)
 
 
 if __name__ == '__main__':

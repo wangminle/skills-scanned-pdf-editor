@@ -2,6 +2,29 @@
 
 本仓库版本号格式：`V主.次.修订`（见根目录 `VERSION`）。发布说明条目可附 Build/日期标签。
 
+## V0.1.5-Build0343-20260810
+
+按 basic-tests 复盘优先修复：字体回填、内嵌导出/旋转、质量门禁、定位模块、E2E 门禁；追加独立审查发现的 4 项门禁/正确性缺陷修复。
+
+### 修复与增强
+
+- **BUG-063**：`font_registry.find_font` 支持完整注册名精确匹配与多词 token 全集匹配；`identify_font` 输出 `回填参数: --font "…"` 可直接粘贴
+- **export-page**：导出内嵌整页原生像素；`--as-displayed` 按 `/Rotate` 转显示朝向；`package --original-pdf` 自动旋回内嵌朝向，拒绝尺寸不匹配的重采样回封
+- **质量门禁**：`identify_font` 密度比超出 `[0.67,1.5]` 或置信度不足时默认退出码 3；`--allow-degraded` 显式降级
+- **locate_content.py**：行带 / 字框 / 供体尺寸候选定位
+- **版本同步**：`sync_install.sh` + `run_checks.sh` 校验仓库 VERSION 与安装副本一致
+- **E2E**：`tests/scripts/test_e2e_basic_tasks.py` 覆盖五项 task 的 export/定位/删除移动供体冒烟
+- **BUG-065**：`run_checks.sh` E2E 段改为可选门禁——测试文件/资产缺失（CI、干净克隆）时 skip 而非失败；git add 三个此前未跟踪的 V0.1.5 新文件（`locate_content.py`/`sync_install.sh`/`test_e2e_basic_tasks.py`）
+- **BUG-066**：`prepare_image_for_pdf_replace` 新增 `source_orient` 参数（`displayed`/`embedded`/`auto`），停止仅凭尺寸猜朝向——`/Rotate=180` 与正方形图尺寸无法区分朝向时 `auto` 报错（exit 2）而非静默封错方向；CLI `package --source-orient`
+- **BUG-067**：`locate_content.find_donor_candidates` 新增行内连通域聚类（`_cluster_into_rows` + 滑动窗口合并），支持「结案」等多字符词块供体搜索；保留单字匹配
+- **BUG-068**：`test_e2e_basic_tasks.py` 文档/类名诚实化（结构+合成冒烟门禁），删除假绿 MAE 自比；新增 `TestGoldenRegression`——资产齐备时回渲 final.pdf 与期望 PNG 做 `diff>10` 百分比真实校验（资产缺失 skip）
+- **文档**：README 删重复 `verify_outputs.py` 行；SKILL.md / scripts_reference.md 补 `--source-orient` 说明
+
+### 测试与门禁
+
+- 219 单元（+10：BUG-065×2、BUG-066×8）+ 14 e2e（+3：BUG-067 多字符供体；TestGoldenRegression 3/3 subtask 真实跑）；`run_checks.sh` ✅
+- **已知限制**：`tests/期望效果/` golden PNG 由未知光栅化器生成，与本仓库 PyMuPDF 渲染存在全页底噪（task003≈11%、task004/005≈4.5%），远大于真实编辑差异；golden 对齐后应收紧 `TestGoldenRegression` 阈值
+
 ## V0.1.4-Build0302-20260808
 
 依赖精简、文档同步、测试修复。
