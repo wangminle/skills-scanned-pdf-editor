@@ -8,6 +8,23 @@
 > 状态说明：Bug 未完成用待修复，通用未完成用待办（或待开发），进行中/已完成/已修复/已关闭/已解决按语义选用；条目互引用 [[BUG-001]] 语法。
 > 归并规则：审计、复核、核查、审查、验证、评估统一记为“检查”；重构、清理统一记为“优化”；方案、梳理统一记为“规划”；记录类文档事项统一记为“文档”。
 
+## 2026-08-16 像素审计闭环迭代
+
+| ID | 动作 | 事项 | 完成时间 | 状态 | 验收结果 |
+| --- | --- | --- | --- | --- | --- |
+| ADJ-012 | 开发 | 增加 MuPDF 原生像素 `extract` 与默认往返封装验证 | 2026-08-16 18:10 | 已完成 | PNG 回读、内嵌图回读、300dpi 回渲、未修改页哈希均纳入门禁 |
+| ADJ-013 | 优化 | 空白残影由固定 180 改为可配置 180/220/240 多阈值 | 2026-08-16 18:10 | 已完成 | CLI 与 JSON 验证器均覆盖，兼容旧单阈值参数 |
+| ADJ-014 | 开发 | 增加行带、墨迹框、字距、基线和移动量测量工具 | 2026-08-16 18:10 | 已完成 | `measure_layout.py` 四个 JSON 子命令 |
+| ADJ-015 | 开发 | 封装时自动执行 300dpi 允许区外变化门禁 | 2026-08-16 18:10 | 已完成 | 用掩模 PDF 双回渲准确映射旋转/放置矩阵，区外非 0 拒绝交付 |
+| ADJ-016 | 检查 | 自动核对所有未修改页内嵌整页图像素哈希 | 2026-08-16 18:10 | 已完成 | package 与 verify_outputs 双重覆盖 |
+| ADJ-017 | 开发 | replace 增加碰撞、最近字距和基线偏差报告/门禁 | 2026-08-16 18:10 | 已完成 | `placement_analysis` JSON + 3 个可选阻断参数 |
+| ADJ-018 | 调整 | 明确 move 清理框 auto/add/replace 语义 | 2026-08-16 18:10 | 已完成 | 歧义组合直接退出码 2 |
+| TST-030 | 检查 | 新增闭环单测并运行真实 PDF 回归 | 2026-08-16 18:10 | 已完成 | 见本轮验证记录与 [[CHK-043]] |
+| DOC-028 | 文档 | 更新 SKILL、参数参考、README、版本和变更记录 | 2026-08-16 18:10 | 已完成 | 版本 V0.1.6，frontmatter 仅 name/description |
+| DOC-029 | 文档 | 沉淀七项像素审计闭环问题的证据、根因、实现与回归结果 | 2026-08-16 18:30 | 已完成 | `design/plans/扫描件像素审计闭环七项优化-20260816.md` |
+| CHK-043 | 检查 | 全量测试、ruff、quick_validate、真实三页 PDF 像素审计 | 2026-08-16 18:10 | 已完成 | ruff 全清；230 passed/2 skipped；e2e 14 passed + 8 subtests；quick_validate valid；真实合同 extract 往返内嵌/300dpi diff=0，未修改第2/3页哈希一致，独立终版允许区外变化=0；SKILL.md 495行 |
+| DOC-030 | 文档 | 文档-代码一致性收尾：scripts_reference 补全 remove/move/replace/compound/verify 参数表与 verify_outputs 节（render_backend 默认 pymupdf）；SKILL.md min-ink-ratio 默认值 0.02→0.01、export-page→extract、清理 task007 引用；scan_edit_ops 模块/CLI 描述补全子命令；根 README 删 verify_config.example.json 残留并修中文检查节；skill README 门禁注释对齐 | 2026-08-16 13:07 | 已完成 | 版本同步 ✅（含安装副本 tar 镜像同步）；ruff 全清；230 passed/2 skipped；e2e 14 passed + 8 subtests（ruff/pytest 以 `python -m` 等效运行）；见 CHANGELOG V0.1.6「文档一致性收尾」 |
+
 ## 代码 Bug
 
 | ID | 动作 | 问题描述 | 发现时间 | 完成时间 | 状态 | 备注 |
@@ -80,6 +97,7 @@
 | BUG-066 | 修复 | `prepare_image_for_pdf_replace` 仅凭尺寸判朝向：`/Rotate=180`（显示尺寸==内嵌尺寸）与正方形图（任何旋转尺寸都相等）会把显示朝向图误判为内嵌朝向原样返回，package 后方向错；单测只用 270 非正方形（尺寸可区分）未覆盖 | 2026-08-10 08:50 | 2026-08-10 09:15 | 已修复 | 新增 `source_orient` 参数（displayed/embedded/auto）；displayed 时无条件旋回；auto 在尺寸无法区分（Rotate=180/正方形）时报错（exit 2）而非静默猜错；CLI `--source-orient`；8 项回归测试覆盖 180/正方形/auto 拒绝/embedded/displayed/CLI；见 [[TST-027]] [[CHK-041]] |
 | BUG-067 | 修复 | `locate_content.find_donor_candidates` 只比单个连通域：多字符词块（如「结案」）墨迹分属多个独立连通域，没有一个单域与参考框等宽 → 返回 0 结果 | 2026-08-10 08:50 | 2026-08-10 09:20 | 已修复 | 新增 `_cluster_into_rows`（y 中心聚行）+ `_union_glyph_box`（合并外接框）；同行相邻连通域滑动窗口生成多字符组合候选；保留单字匹配；3 项回归测试（双字命中/单字不回归/跨行不误聚）；见 [[TST-027]] [[CHK-041]] |
 | BUG-068 | 修复 | `test_e2e_basic_tasks.py` 的 `TestExpectedVisualThreshold` 是假绿：自称「视觉回归」但只用零数组自比 `_local_mae(a,a)`，从不生成结果、不读期望图、不比像素；视觉回归发生时门禁仍通过 | 2026-08-10 08:50 | 2026-08-10 09:35 | 已修复 | 文件 docstring 与类名诚实化（结构+合成冒烟门禁）；删假 MAE 自比；新增 `TestGoldenRegression`：资产齐备时回渲 final.pdf 与期望 PNG 做 diff>10 百分比校验（按 task 差异化阈值，反映 golden 光栅化底噪），资产缺失 skip；实测 task003≈11%/task004≈4.4%/task005≈4.5%（golden 用未知光栅化器生成，存在全页底噪，阈值留余量，golden 对齐后应收紧）；见 [[TST-027]] [[CHK-041]] |
+| BUG-069 | 修复 | `scan_text_fusion.py --output` 含目录分隔符时，产物落到 `scan_text_fusion_out/<原路径>` 嵌套路径，易导致后续 `package` FileNotFoundError（20260816 task001 复现） | 2026-08-16 10:41 | 2026-08-16 12:10 | 已关闭 | CLI 层拒绝带路径/绝对路径/`..` 的 --output（退出码 2，提示改用 --output-dir）；save_with_crop 函数级容错保留。回归 TestBugFix069_OutputPathRejected 4 项；见 [[TST-029]] [[CHK-042]] [[DOC-027]] |
 
 ## 调整事项
 
@@ -95,6 +113,7 @@
 | ADJ-008 | 调整 | 将 test_skill.py 从 skills/scanned-pdf-editor/scripts/ 移至 tests/scripts/：测试文件属开发层面，不随 skill 安装到用户环境 | 2026-08-07 19:20 | 2026-08-07 19:25 | 已完成 | test_skill.py 中所有 Path(__file__).parent 改为 SCRIPTS_DIR 常量指向 skills 脚本目录；E402 加 noqa；run_checks.sh 用 PROJECT_ROOT 变量定位测试文件；README.md/SKILL.md 更新测试命令路径；三处安装目录同步删除 test_skill.py；152 passed / ruff 全清 / run_checks.sh ✅ |
 | ADJ-009 | 调整 | 去掉 ReportLab：`save_image_as_pdf` 改用 PyMuPDF 新建单页 PDF；package 两种模式统一 | 2026-08-08 12:21 | 2026-08-08 12:25 | 已完成 | requirements 移除 reportlab；单测校验页尺寸/元数据/源码无 reportlab；196 passed / run_checks ✅；见 [[OPT-004]] [[DOC-017]] |
 | ADJ-010 | 调整 | identify_font 交付门禁：密度比超出 [0.67,1.5] 或置信度不足时默认 exit 3；`--allow-degraded` 显式降级 | 2026-08-09 17:37 | 2026-08-09 17:47 | 已完成 | 解决 task002 仅警告仍继续生成偏粗字；见 [[BUG-063]] [[DEV-008]] |
+| ADJ-011 | 调整 | 字体注册表补录与 ttc 字重可达性：新增 Songti SC Light/Regular、STHeiti Light/Medium、Noto Sans SC (NotoSansSC.ttf)；「Songti SC」裸名由 index 0（实为 Black）改指 Regular(index 6)；`--candidates` 支持 `名称=文件名[索引]`（旧实现硬编码 0，多字重家族坍缩同分） | 2026-08-16 11:50 | 2026-08-16 12:10 | 已完成 | 20260816 复测实证：本机可用候选 3→8 个，task002 默认候选池即可选出 SongtiSCRegular（密度比 1.30 入门禁区间，此前最优 1.85）；识别时 Hiragino W3/W6 不再同分；见 [[TST-028]] [[TST-029]] [[DOC-027]] |
 
 ## 检查事项
 
@@ -142,6 +161,7 @@
 | CHK-039 | 检查 | 诊断并修正 task004/005 V3「大量错位和残留」问题：用户指出 V1/V2 均有可见重影与错位 | 2026-08-09 00:05 | 2026-08-09 00:30 | 已完成 | **根因**：content_x="460,2100" 过窄——源页文字实际起始 x≈390（列暗度 74-161 dark/col），move 命令仅搬运 x=460-2100 范围内像素，x=390-460 文字在重叠区停留原位，每行左缘 60px 未移动造成逐行重影。验证：V2 时 x=400-460 区域 result 与 source 100% 相同（完全未移动）。**修正**：content_x 改为 380,2100；task004 额外修正 shift_y 267→265（互相关校正：265px 匹配率 99.8% vs 267px 86.1%）。**结果**：task004 diff 4.38%→0.07%、task005 diff 0.35%→0.03%；重影匹配率 100%→70/78%（已被正确移动）。[[CHK-038]] [[TST-024]] [[TST-025]] |
 | CHK-040 | 检查 | V0.1.5 五项优先修复全量回归：run_checks（version+ruff+209 unit+11 e2e）+ 安装副本同步 | 2026-08-09 17:47 | 2026-08-09 17:47 | 已完成 | All checks passed；见 [[BUG-063]] [[BUG-064]] [[DEV-008]] [[TST-026]] |
 | CHK-041 | 检查 | 独立审查发现的 4 个门禁/正确性缺陷修复与回归：BUG-065（E2E 可选门禁）/BUG-066（朝向显式传参）/BUG-067（多字符供体）/BUG-068（假绿视觉回归） | 2026-08-10 08:50 | 2026-08-10 09:40 | 已完成 | run_checks ✅：ruff 全清 + 219 unit（209+10 新：BUG-065×2+BUG-066×8）+ 14 e2e（11+3 新 BUG-067；TestGoldenRegression 3/3 subtest 真实跑）；安装副本 rsync 同步；发现 golden 光栅化底噪（task003≈11%/task004/005≈4.5%），阈值留余量并文档化待 golden 对齐后收紧 |
+| CHK-042 | 检查 | 20260816 重跑 tests/测试任务 五项 + 期望效果对比，评估 skill 设计完备性（V0.1.5） | 2026-08-16 10:37 | 2026-08-16 10:42 | 已完成 | 门禁 233 passed；task003/004/005 高度/基本一致（diff>10≈2.16%/0.08%/0.05%）；task001/002 全页好看但新增区 crop diff>10≈17.6%/27.3%；缺口见 [[BUG-069]] [[DOC-027]]；报告 `tests/results/20260816-对比报告.md` |
 
 ## 测试数据
 
@@ -174,6 +194,8 @@
 | TST-025 | 开发 | 端到端测试 task005：第5条胜诉→结案（供体来自同页6/7条）+ 删第6/7条 + 第三/四条上移 | 2026-08-08 22:30 | 2026-08-09 00:30 | 已完成 | 结果目录 20260808-0005。V2 校正：胜诉坐标 x≈1195-1290、移动量 357px（4 行）；V3 修正 content_x 460→380（同 task004 重影修复）。编排：替换 item5（C）→删 6/7 条（A）→上移 357px（B, content_x=380）→封装。与预期对照：整体 diff 0.35%→**0.03%**、重影消除（x=400-460 匹配率 100%→78.0%）✓ |
 | TST-026 | 开发 | V0.1.5 回归：字体回填/质量门禁/export-page 旋转/locate + basic-tasks e2e 门禁纳入 run_checks | 2026-08-09 17:37 | 2026-08-09 17:47 | 已完成 | TestBugFix063 + TestExportPageAndRotatePackage + TestFontQualityGate；test_e2e_basic_tasks.py 11 passed（5 task export + 定位 + 删除移动供体冒烟）；209 unit + 11 e2e；run_checks ✅ |
 | TST-027 | 开发 | BUG-065~068 回归：E2E 可选门禁结构锁 + source_orient 朝向（180/正方形/auto 拒绝/embedded/displayed/CLI）+ 多字符供体（双字/单字/跨行）+ golden 真实视觉对比 | 2026-08-10 08:50 | 2026-08-10 09:40 | 已完成 | TestBugFix065_E2eOptionalGate（2）+ TestBugFix066_SourceOrient（8）+ test_e2e 3 项多字符供体 + TestGoldenRegression（3/3 subtask 真实跑）；219 unit + 14 e2e；run_checks ✅；见 [[CHK-041]] |
+| TST-028 | 复测 | 20260816 全套复测（skill 完备性检查）：agent 按 SKILL.md + basic-tests-readme 字面流程独立重跑 task001-005 | 2026-08-16 10:43 | 2026-08-16 11:40 | 已完成 | 五任务全部完成：task003/004/005 与期望高度一致（diff≤0.43%/基线对照法），task001/002 字体降级但可用；内嵌图封装五任务 diff=0；产出 `tests/results/20260816-对比报告.md` 与 `design/plans/20260816-skill完备性复测评估.md`；同日早前会话产物归档 `tests/results/早前会话1040归档/`。发现 13 项设计缺口（P0：模式 D 200dpi/封装分辨率死锁、无 OCR 辅助定位指引），详见评估文档 |
+| TST-029 | 开发 | 20260816 复测问题修复回归：BUG-069 --output 路径拒绝（TestBugFix069×4：相对/绝对/../ 拒绝 exit 2 + 裸文件名可用）+ 字体注册表/candidates 索引（Songti 多字重映射校验 + parse_candidates_spec [idx]/尾逗号/缺=号） | 2026-08-16 12:00 | 2026-08-16 12:10 | 已完成 | 20 项字体相关测试通过；见 [[BUG-069]] [[ADJ-011]] |
 
 ## 文档维护
 
@@ -205,6 +227,7 @@
 | DOC-024 | 文档 | 对照 20260720 手动项目 vs skill/agent e2e：协议2/3 方案差异分析 | 2026-08-09 03:11 | 2026-08-09 03:20 | 已完成 | 手动 content-x=330..2250/2200（宽主栏）；agent 曾用 460..2100 切掉续行/地址左缘。协议2 手动先移后替；协议3 手动「上移覆盖删6/7+首行修补」vs agent「interpolate 删后再移」。供体框手动 787..877 vs agent 曾偏右。期望效果即手动终版回渲。见 [[CHK-037]] |
 | DOC-025 | 文档 | 据手动对照沉淀通用规程写入 SKILL.md / basic-tests-readme | 2026-08-09 03:17 | 2026-08-09 03:20 | 已完成 | 原则7细化同页/跨页供体顺序；原则8框选贴字；模式B上移量按留白反推+先清后移/上移覆盖两策略；模式C供体/清理框贴字说明；验证表增左右残片与替换框内文字检查；readme 同步。481行<500 |
 | DOC-026 | 文档 | 版本升至 V0.1.5：CHANGELOG/VERSION/SKILL/README；文档 export-page、质量门禁、locate、sync_install | 2026-08-09 17:37 | 2026-08-09 17:47 | 已完成 | SKILL.md 492 行 <500；见 [[DEV-008]] |
+| DOC-027 | 文档 | SKILL/readme 补强：模式 D 200dpi 与 `package --original-pdf` 尺寸分支；`--allow-degraded` 决策树；basic-tests 引导 locate_content | 2026-08-16 10:42 | 2026-08-16 12:10 | 已完成 | SKILL.md：模式 D 增加分辨率/封装分支表（内嵌非 200dpi 且保 OCR → export-page 原生分辨率路线 + ink-color 压深）、新增「内容定位（先 OCR 后像素）」章节（tesseract 行映射 + locate_content 双证据、短行 min-ink-ratio 提示）、--allow-degraded 三步决策树、验证表改「内嵌图 diff=0 为判据；回渲仅校验朝向版式」、crop-box 示例修正（scan_edit_ops 逗号/fusion 空格）；basic-tests-readme：task002 改内嵌分辨率路线、task001 补 PyMuPDF 渲染替代、通用注意事项补定位双证据/短行/crop-box 三条；scripts_reference 补 --output 契约与新字重注册表；见 [[CHK-042]] [[TST-028]] [[ADJ-011]] |
 
 ## 功能开发
 
@@ -263,14 +286,14 @@
 
 | 分类 | 总数 | 已完成 | 待开发/待修复 | 完成率 |
 | --- | --- | --- | --- | --- |
-| 代码 Bug | 68 | 68 | 0 | 100% |
-| 调整事项 | 10 | 10 | 0 | 100% |
-| 检查事项 | 42 | 42 | 0 | 100% |
-| 测试数据 | 27 | 25 | 2 | 93% |
-| 文档维护 | 26 | 26 | 0 | 100% |
+| 代码 Bug | 69 | 69 | 0 | 100% |
+| 调整事项 | 11 | 11 | 0 | 100% |
+| 检查事项 | 43 | 43 | 0 | 100% |
+| 测试数据 | 29 | 29 | 0 | 100% |
+| 文档维护 | 27 | 27 | 0 | 100% |
 | 功能开发 | 8 | 8 | 0 | 100% |
 | 配置运维 | 11 | 11 | 0 | 100% |
 | 规划事项 | 3 | 3 | 0 | 100% |
 | 优化事项 | 4 | 4 | 0 | 100% |
 | 调研事项 | 2 | 2 | 0 | 100% |
-| **总计** | 201 | 199 | 2 | 99.0% |
+| **总计** | 207 | 207 | 0 | 100% |

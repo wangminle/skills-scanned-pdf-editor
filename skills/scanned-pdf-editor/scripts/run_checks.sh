@@ -25,17 +25,17 @@ fi
 echo "== version consistency =="
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 REPO_VER="$(tr -d '[:space:]' < "$PROJECT_ROOT/VERSION")"
-SKILL_VER="$(grep -E '^version:' "$SCRIPT_DIR/../SKILL.md" | head -1 | awk '{print $2}' | tr -d '[:space:]')"
+SKILL_VER="$(grep -Eo 'V[0-9]+\.[0-9]+\.[0-9]+' "$SCRIPT_DIR/../SKILL.md" | head -1)"
 if [[ "$REPO_VER" != "$SKILL_VER" ]]; then
   echo "ERROR: VERSION ($REPO_VER) != SKILL.md version ($SKILL_VER)" >&2
   exit 1
 fi
-echo "version: $REPO_VER (VERSION == SKILL.md)"
+echo "version: $REPO_VER (VERSION == SKILL.md body marker)"
 
 # 若本机安装副本存在，检查版本漂移（不强制失败于未安装；已安装则必须一致）
 for DEST in "$HOME/.agents/skills/scanned-pdf-editor" "$HOME/.claude/skills/scanned-pdf-editor"; do
   if [[ -f "$DEST/SKILL.md" ]]; then
-    INST_VER="$(grep -E '^version:' "$DEST/SKILL.md" | head -1 | awk '{print $2}' | tr -d '[:space:]')"
+    INST_VER="$(grep -Eo 'V[0-9]+\.[0-9]+\.[0-9]+' "$DEST/SKILL.md" | head -1)"
     if [[ "${INST_VER}" != "${REPO_VER}" ]]; then
       echo "ERROR: install copy version drift: ${DEST} is ${INST_VER}, repo is ${REPO_VER}" >&2
       echo "  run: bash \"${SCRIPT_DIR}/sync_install.sh\"" >&2

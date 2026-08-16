@@ -24,12 +24,13 @@
     "expected_changed_pixels": 1577499,
     "expected_changed_bbox": [x1,y1,x2,y2],
     "blank_box": [x1,y1,x2,y2],
-    "blank_dark_limit": 0,
+    "blank_thresholds": [180, 220, 240],
+    "blank_dark_limits": {"180": 0, "220": 0, "240": 0},
     "preserve_box": [x1,y1,x2,y2],
     "dark_box": [x1,y1,x2,y2],
     "dark_threshold": 210,
     "dark_limit": 0,
-    "render_backend": "pdfium",
+    "render_backend": "pymupdf",
     "reproduce_command": "可选：可复现的处理管线重跑命令（shell 执行，产出写入 reproduce_image）",
     "reproduce_image": "可选：reproduce_command 的重算输出图路径，供 --reproduce 容差比较",
     "expected_pages": 1,
@@ -69,12 +70,13 @@ class VerifyCase:
     expected_changed_pixels: int | None = None
     expected_changed_bbox: utils.Box | None = None
     blank_box: utils.Box | None = None
-    blank_dark_limit: int = 0
+    blank_thresholds: tuple[int, ...] = (180, 220, 240)
+    blank_dark_limits: tuple[tuple[int, int], ...] = ((180, 0), (220, 0), (240, 0))
     preserve_box: utils.Box | None = None
     dark_box: utils.Box | None = None
     dark_threshold: int = 180
     dark_limit: int = 0
-    render_backend: str = "pdfium"
+    render_backend: str = "pymupdf"
     render_dpi: int = 300
     reproduce_command: str | None = None
     reproduce_image: Path | None = None
@@ -82,6 +84,29 @@ class VerifyCase:
     # package --page-index 可封装多页 PDF 中的指定页，这里按配置验证对应页。
     expected_pages: int = 1
     page_index: int = 0
+    verify_unmodified_pages: bool = True
+
+
+def _blank_check_config(item: dict) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
+    """读取多阈值残影配置，并兼容旧的 blank_dark_limit。"""
+    raw_thresholds = item.get("blank_thresholds", [180, 220, 240])
+    thresholds = tuple(dict.fromkeys(int(value) for value in raw_thresholds))
+    if not thresholds or any(value < 1 or value > 255 for value in thresholds):
+        raise ValueError(f"blank_thresholds 须为 1..255 的非空列表: {raw_thresholds!r}")
+    raw_limits = item.get("blank_dark_limits")
+    if raw_limits is None:
+        legacy = int(item.get("blank_dark_limit", 0))
+        limits = {threshold: legacy for threshold in thresholds}
+    elif isinstance(raw_limits, int):
+        limits = {threshold: raw_limits for threshold in thresholds}
+    elif isinstance(raw_limits, dict):
+        limits = {
+            threshold: int(raw_limits.get(str(threshold), raw_limits.get(threshold, 0)))
+            for threshold in thresholds
+        }
+    else:
+        raise ValueError("blank_dark_limits 须为整数或按阈值索引的对象")
+    return thresholds, tuple((threshold, limits[threshold]) for threshold in thresholds)
 
 
 def load_config(config_path: Path) -> list[VerifyCase]:
@@ -89,6 +114,7 @@ def load_config(config_path: Path) -> list[VerifyCase]:
         data = json.load(f)
     cases = []
     for item in data:
+        blank_thresholds, blank_dark_limits = _blank_check_config(item)
         cases.append(VerifyCase(
             name=item["name"],
             source_pdf=Path(item["source_pdf"]),
@@ -100,17 +126,19 @@ def load_config(config_path: Path) -> list[VerifyCase]:
             expected_changed_pixels=item.get("expected_changed_pixels"),
             expected_changed_bbox=tuple(item["expected_changed_bbox"]) if item.get("expected_changed_bbox") else None,
             blank_box=tuple(item["blank_box"]) if item.get("blank_box") else None,
-            blank_dark_limit=item.get("blank_dark_limit", 0),
+            blank_thresholds=blank_thresholds,
+            blank_dark_limits=blank_dark_limits,
             preserve_box=tuple(item["preserve_box"]) if item.get("preserve_box") else None,
             dark_box=tuple(item["dark_box"]) if item.get("dark_box") else None,
             dark_threshold=item.get("dark_threshold", 180),
             dark_limit=item.get("dark_limit", 0),
-            render_backend=item.get("render_backend", "pdfium"),
+            render_backend=item.get("render_backend", "pymupdf"),
             render_dpi=item.get("render_dpi", 300),
             reproduce_command=item.get("reproduce_command"),
             reproduce_image=Path(item["reproduce_image"]) if item.get("reproduce_image") else None,
             expected_pages=item.get("expected_pages", 1),
             page_index=item.get("page_index", 0),
+            verify_unmodified_pages=item.get("verify_unmodified_pages", True),
         ))
     return cases
 
@@ -121,23 +149,9 @@ def render_case_page(
     if backend == "pdfium":
         return np.asarray(utils.render_pdf_page(path, page_index=page_index, dpi=dpi))
     if backend == "pymupdf":
-        import fitz
-        # BUG-049：与 BUG-048 同族--fitz 文档句柄须 try/finally 关闭，
-        # page_index 须校验避免负索引回绕静默渲染末页。
-        document = fitz.open(str(path))
-        try:
-            if not 0 <= page_index < len(document):
-                raise IndexError(f"页码越界: {page_index + 1}/{len(document)}")
-            page = document[page_index]
-            pixmap = page.get_pixmap(
-                matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False
-            )
-            image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
-                pixmap.height, pixmap.width, pixmap.n
-            )[..., :3].copy()
-        finally:
-            document.close()
-        return image
+        return np.asarray(
+            utils.render_pdf_page_mupdf(path, page_index=page_index, dpi=dpi)
+        )
     raise ValueError(f"未知渲染后端：{backend}")
 
 
@@ -171,6 +185,19 @@ def verify(case: VerifyCase, *, strict_hash: bool, reproduce: bool = False) -> l
         errors.append(
             f"第 {case.page_index + 1} 页尺寸应为 {case.page_size}，实际为 {page_size}"
         )
+
+    if case.verify_unmodified_pages and pages > 1:
+        try:
+            mismatches = utils.compare_unmodified_page_hashes(
+                case.source_pdf, case.final_pdf, modified_pages={case.page_index}
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"未修改页内嵌图哈希检查失败: {type(exc).__name__}: {exc}")
+        else:
+            if mismatches:
+                page_numbers = ", ".join(str(index + 1) for index in mismatches)
+                errors.append(f"未修改页内嵌图像素哈希变化: 第 {page_numbers} 页")
+            print(f"  未修改页内嵌图哈希：{pages - 1 - len(mismatches)}/{pages - 1} 一致")
 
     # SHA-256
     if case.expected_sha256:
@@ -223,10 +250,15 @@ def verify(case: VerifyCase, *, strict_hash: bool, reproduce: bool = False) -> l
 
     # 空白行检查
     if case.blank_box:
-        dark = utils.blank_region_dark_pixels(final, case.blank_box, threshold=180)
-        if dark > case.blank_dark_limit:
-            errors.append(f"预留空白区深色像素为 {dark}，上限为 {case.blank_dark_limit}")
-        print(f"  空白区深色像素（亮度<180）：{dark}")
+        limits = dict(case.blank_dark_limits)
+        for threshold in case.blank_thresholds:
+            dark = utils.blank_region_dark_pixels(final, case.blank_box, threshold=threshold)
+            limit = limits[threshold]
+            if dark > limit:
+                errors.append(
+                    f"预留空白区亮度<{threshold} 的像素为 {dark}，上限为 {limit}"
+                )
+            print(f"  空白区残影像素（亮度<{threshold}）：{dark} / 上限 {limit}")
 
     # 应保留区域
     if case.preserve_box:

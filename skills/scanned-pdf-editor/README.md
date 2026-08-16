@@ -1,6 +1,6 @@
 # scanned-pdf-editor
 
-**版本：V0.1.5**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
+**版本：V0.1.6**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
 
 扫描版 PDF / 扫描件图片的局部编辑技能：删除指定内容、移动正文位置、替换已有文字、补录新增文字，
 使修改区域的像素与原扫描件的字体、字号、墨色、纸纹、扫描噪点风格一致。
@@ -20,7 +20,7 @@ cd scripts
 # 自测
 python3 -m pytest ../../../tests/scripts/test_skill.py -v
 
-# 回归门禁（静态检查 + 单元测试，任一失败即非零退出）
+# 回归门禁（版本同步 + ruff + pytest + 可选 e2e，任一失败即非零退出）
 ./run_checks.sh
 
 # 删除指定区域
@@ -42,8 +42,10 @@ python3 scan_edit_ops.py package --source page_final.png --output final.pdf \
     --page-size 595.2,841.68
 
 # 或：保留 OCR 层（替换内嵌图）
+python3 scan_edit_ops.py extract --pdf source.pdf --output page.png --as-displayed
 python3 scan_edit_ops.py package --source page_final.png --output final.pdf \
-    --original-pdf source.pdf
+    --original-pdf source.pdf --source-orient displayed \
+    --audit-allowed-boxes "x1,y1,x2,y2"
 
 # 验证
 python3 scan_edit_ops.py verify --source page.png --result page_edited.png \
@@ -83,9 +85,10 @@ scripts/
   identify_size.py            字号识别（墨迹共识 + 置信度门）
   align_text.py               垂直中心对齐（墨迹重心计算）
   scan_edit_utils.py          共用工具（渲染、蒙版、修补、移动、替换、差分、验证）
-  scan_edit_ops.py            统一 CLI：删除/移动/替换/封装/验证
+  scan_edit_ops.py            统一 CLI：删除/移动/替换/安全提取/封装/验证
   scan_text_fusion.py         扫描融合 + 蓝灰晕染（增加文字路线）
   locate_content.py           行带 / 字框 / 供体候选定位
+  measure_layout.py           行距 / 墨迹框 / 字距 / 基线 / 移动量测量
   verify_outputs.py           泛化验证框架（JSON 配置驱动）
   run_checks.sh               回归门禁（版本同步 + ruff + pytest + 可选 e2e）
   sync_install.sh             同步技能到 ~/.agents / ~/.claude 安装目录

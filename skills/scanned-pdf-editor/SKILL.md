@@ -1,12 +1,11 @@
 ---
 name: scanned-pdf-editor
 description: 对用户有权编辑的扫描版 PDF 或扫描件图片做局部编辑（删除内容、移动位置、替换文字、补录新文字），使修改区域在字体、字号、墨色、纸纹、扫描噪点上与原扫描件像素级一致。仅用于授权且内容真实的场景，不用于伪造或篡改以误导第三方。
-version: V0.1.5
 ---
 
 # 扫描版 PDF 编辑修改（scanned-pdf-editor）
 
-> **版本**：V0.1.5（见仓库根目录 `VERSION` / `CHANGELOG.md`）
+> **版本**：V0.1.6（见仓库根目录 `VERSION` / `CHANGELOG.md`）
 > **运行环境**：Python 3.10+
 
 对扫描版 PDF 或扫描件图片做局部编辑，使修改区域在字体、字号、墨色、纸纹、扫描噪点上
@@ -43,6 +42,32 @@ version: V0.1.5
 
 > **坐标约定（全局）**：所有框/区间像素坐标须**非负**且**有序**（`x1<x2`、`y1<y2`）。
 > 负值会报错，不会被 numpy/PIL 静默回绕到页尾。
+
+## 内容定位（先 OCR 后像素，双证据）
+
+「框选区域」前先知道**框在哪里、框的是什么字**。推荐流程：
+
+1. **OCR 行映射**：对整页跑 OCR（本机 tesseract `chi_sim` 已验证可靠），得到
+   「文字内容 ↔ 大致 y 范围」的行映射，据此锁定目标段/目标词所在行。
+   ```bash
+   tesseract page.png stdout -l chi_sim --psm 6          # 通读整页
+   ```
+   PDF 本身带 OCR 文字层时（`fitz page.get_text()` 非空），直接用文字层定位更快，
+   坐标按 点尺寸×dpi/72 换算成像素后仍须在下步实测复核。
+2. **像素行带/字框精测**：用 `locate_content.py lines/glyphs` 在 OCR 给出的邻域取
+   精确墨迹行带与字框；两套证据互相印证后才进入删除/移动/替换。
+3. **记录可复核数值**：用 `measure_layout.py lines/ink-bbox/gap/shift` 输出 JSON；
+   将行距、墨迹框、最近字距、碰撞像素、基线差和移动量写入 `过程记录.md`。
+
+注意事项（实测教训）：
+- **勿以目视/视觉转写为准**：视觉模型转写中文扫描件易把任务描述复读成坐标
+  （20260816 复测被误导两例）。视觉仅作最终 crop 复核。
+- **短行要降阈值**：`locate_content.py lines` 默认 `--min-ink-ratio 0.01`，短行
+  （如「实施。」，实测 ink_ratio≈0.015，已贴近阈值，region 越宽越易漏）仍可能漏检，
+  短行显式加 `--min-ink-ratio 0.005`（与 `measure_layout.py lines` 默认一致）。
+- **合并行带要细分**：行距近的段落会被并成一条宽带（h>80px 即可疑），改窄
+  `--region` 的 x 范围或分段重测。
+
 ## 四种操作模式
 
 ### 模式 A：删除内容
@@ -63,7 +88,7 @@ python3 scripts/scan_edit_ops.py remove \
   --boxes "1197,1665,1288,1718" "1196,2110,1289,2165" \
   --ink-threshold 180 \
   --output page_removed.png \
-  --crop-box 900 1550 1500 2680
+  --crop-box 900,1550,1500,2680
 ```
 
 **方法二：行间插值填底**（适合需要彻底清除文字与扫描残影）
@@ -116,9 +141,11 @@ python3 scripts/scan_edit_ops.py move \
   --content-x 330,2250 \
   --source-y 1735,3070 \
   --shift-y 265 \
+  --cleanup-mode add \
+  --cleanup-boxes "330,3000,2250,3070" \
   --cleanup-ink-threshold 246 \
   --output page_moved.png \
-  --crop-box 120 1320 2350 2200
+  --crop-box 120,1320,2350,2200
 ```
 
 | 参数 | 说明 | 默认 |
@@ -126,8 +153,9 @@ python3 scripts/scan_edit_ops.py move \
 | `--content-x` | 移动区域横向范围 `x1,x2`（须覆盖 `source-y` 带内**全部正文墨迹**；非负、`x1<x2`、落在图宽内） | 必填 |
 | `--source-y` | 移动区域纵向范围 `y1,y2`（须非负、`y1<y2`） | 必填 |
 | `--shift-y` | 上移像素数（正值=上移；目标位置越出页面会报错，不会静默绕行） | 必填 |
+| `--cleanup-mode` | `auto`=只用自动尾部框；`add`=自动框+手动框；`replace`=只用手动框 | `auto` |
 | `--cleanup-ink-threshold` | 残留清理的墨迹阈值 | 246 |
-| `--cleanup-boxes` | 手动指定残留清理区域列表 `x1,y1,x2,y2`（可多个；每框须非负且有序） | 自动取源区域尾部 |
+| `--cleanup-boxes` | 手动清理框；仅与 `add/replace` 配合，禁止隐式替代自动框 | 无 |
 
 **`content-x` / `source-y` 测量规程（必做）**
 
@@ -141,7 +169,7 @@ python3 scripts/scan_edit_ops.py move \
 
 ### 模式 B+：复合操作（复制后清除）
 
-task007 类"先复制再清除"的复合流程：保存源块 -> 用插值填底清除多个区域（含源区域本身）-> 粘贴源块到上移位置。与 `move` 的区别：清除用插值填底（整矩形），且可一次清除多个额外区域。
+"先复制再清除"的复合流程：保存源块 -> 用插值填底清除多个区域（含源区域本身）-> 粘贴源块到上移位置。与 `move` 的区别：清除用插值填底（整矩形），且可一次清除多个额外区域。
 
 ```bash
 python3 scripts/scan_edit_ops.py compound \
@@ -165,7 +193,7 @@ python3 scripts/scan_edit_ops.py compound \
 | `--noise-sigma` | 插值填底的噪声 sigma | 0.45 |
 | `--seed` | 随机种子 | 20260805 |
 | `--output` | 输出路径 | 必填 |
-| `--crop-box` | 额外裁剪预览框 `x1 y1 x2 y2` | 无 |
+| `--crop-box` | 额外裁剪预览框 `x1,y1,x2,y2`（逗号分隔；注意 scan_text_fusion 用空格分隔） | 无 |
 
 ### 模式 C：替换文字
 
@@ -190,7 +218,7 @@ python3 scripts/scan_edit_ops.py replace \
   --destination 1195,585 \
   --reference-box 651,585,696,638 \
   --output page_replaced.png \
-  --crop-box 1000 540 1450 670
+  --crop-box 1000,540,1450,670
 ```
 
 | 参数 | 说明 | 默认 |
@@ -203,8 +231,11 @@ python3 scripts/scan_edit_ops.py replace \
 | `--feather` | 羽化宽度（`<=0` 或宽/高≤2 时为硬边全覆盖，不产生 NaN/全零蒙版） | 4 |
 | `--mask-mode` | 清理蒙版模式：`ink`=墨迹蒙版（默认）；`full`=整矩形蒙版 | `ink` |
 | `--normalize-mode` | 供体归一化：`contrast`=对比度缩放（默认；供体/参考须有足够纸白-墨迹对比度，否则改用 `offset`）；`offset`=纯底色偏移 | `contrast` |
+| `--analysis-threshold` | 碰撞、最近字距和基线分析阈值 | 220 |
+| `--fail-on-collision` / `--min-gap` / `--max-baseline-deviation` | 将相交、字距或基线偏差升级为门禁 | 不阻断，仅报告 |
 
 供体只做对比度归一化（或纯底色偏移）和羽化，**不缩放、不锐化、不重新描边**。
+命令必输出 `placement_analysis` JSON；至少复核碰撞为 0、最近字距合理、基线偏差可接受。
 
 #### C-2：字体合成替换（后备）
 
@@ -251,10 +282,21 @@ python3 scripts/scan_text_fusion.py --source page.png \
 
 **为什么 200 dpi**：扫描融合的 alpha 上限约 0.93，无法复现极重墨扫描件的暗度；200 dpi 下采样把整页均匀变浅，落在融合可达范围内，自洽。删除/移动/替换用 300 dpi 或内嵌图（纯搬像素需高精度）。
 
+> **分辨率与封装的分支（必读，防死锁）**：`package --original-pdf` 要求编辑图与内嵌图**同尺寸**（防静默重采样）。因此加字前先确认封装路线：
+>
+> | 场景 | 路线 |
+> |---|---|
+> | 内嵌图 ≈200dpi 或允许新建 PDF（无 OCR 层可弃） | 200dpi 渲染 → 融合 → 封装时替换内嵌图或 `--page-size` 新建 |
+> | 内嵌图为其他分辨率（如 ≈300dpi）且要保留 OCR 层 | **直接用 `extract` 导出内嵌图，在内嵌原生分辨率上走第 2-7 步**（字号按内嵌图重识别），融合时把 `--ink-color` 压深（可到 10/10/15 量级）弥补 alpha 上限，最后原样封装 |
+>
+> 误用 200dpi 成品去替换非 200dpi 内嵌图会在封装步被拒绝（退出码 2），此时回头在内嵌分辨率上重做，不要试图缩放凑尺寸。
+
 #### 第 1 步：准备源图
 
 ```bash
 pdftoppm -png -r 200 -f 2 -l 2 "源.pdf" page      # 产出 page-2.png
+# 无 poppler 时用 PyMuPDF 等价渲染（同为显示朝向）：
+python3 -c "import fitz,sys; d=fitz.open(sys.argv[1]); d[1].get_pixmap(dpi=200).save('page-2.png')" "源.pdf"
 ```
 
 #### 第 1.5 步：检查字体环境（首次使用或换机器时必做）
@@ -295,6 +337,16 @@ python3 scripts/identify_font.py --source page.png \
 > `[0.67, 1.5]`，或置信度非「确定」（单候选参考除外），**默认退出码 3 阻断**，避免继续加出偏粗/偏细字。
 > 典型场景：原文是仿宋但本机未安装，误判为宋体（密度约 1.8～2×）。须先安装缺失字体重跑；
 > 若明确接受降级结果，加 `--allow-degraded`。成功时会打印 `回填参数: --font "注册名"`，可直接粘贴到下一步。
+>
+> **被阻断时的决策树**：
+> 1. 密度比超限（偏粗/偏细明显）→ 先解决字体：`check_fonts.py` 看缺口；macOS 注意
+>    `Songti.ttc` 内含 Light/Regular/Bold/Black 多字重（注册表已按索引拆分），细笔画
+>    文书（仿宋系）优先试 Songti SC Light/Regular；`--candidates 名称=文件名[索引]`
+>    可手工加候选。装好/加好后重跑。
+> 2. 密度比在区间内、仅置信度「参考」（领先不足）→ 字体本身匹配尚可，属可降级情形：
+>    记录「参考级 + 密度比数值」后加 `--allow-degraded` 继续，成品须人工重点验收字形。
+> 3. 候选全未装/无法补齐 → `--allow-degraded` 走最优已装候选，并在过程记录标注降级原因；
+>    效果预期「偏粗或偏细」，向用户明示。
 
 #### 第 3 步：识别字号
 
@@ -388,10 +440,12 @@ python3 scripts/scan_text_fusion.py --source page.png \
 |---|---|
 | 尺寸一致 | 最终图尺寸 == 源图尺寸 |
 | PDF 页数 / 页面点尺寸 | 与原始 PDF 一致（不默认 A4） |
-| 300dpi 回渲 | 与确认 PNG 逐像素一致 |
+| 封装内嵌图无损 | 从最终 PDF 抽取内嵌图（`fitz.Pixmap(doc, xref)`）与编辑 PNG 逐像素比对（diff=0 为判据） |
+| 300dpi 回渲 | `package` 用与提取同链的 MuPDF + 掩模 PDF 映射允许区，区外变化非 0 即拒绝交付 |
+| 未修改页面 | 自动逐页比较内嵌整页图原生 RGB 像素 SHA-256 |
 | 变化像素数 + 外框 | 与预期值比对 |
 | 允许区外变化 | `verify_outputs.py` 检查 = 0 |
-| 空白行深色像素 | 亮度 <180 的像素不超过上限；检查框须与图像有交集，否则验证失败 |
+| 空白行残影 | 默认同时检查亮度 <180、<220、<240；各级上限可独立配置 |
 | 应保留区域 | 无变化像素；检查框须与图像有交集，否则验证失败 |
 | 应删区域深色像素 | 不超过上限 |
 | 移动后左右残片 | 原 `source-y` 带在 `content-x` 外不应残留正文半字；目标行左缘完整（勿只看全页 diff%） |
@@ -401,53 +455,19 @@ python3 scripts/scan_text_fusion.py --source page.png \
 | 100% 整体 + 300% 细节 | 人工视觉检查 |
 
 ```bash
-# 像素级验证
 python3 scripts/verify_outputs.py --config verify_config.json
-
-# 归档完整性
 python3 scripts/verify_outputs.py --config verify_config.json --strict-hash
-
-# 复现容差检查：基准图（expected_image）或配置的 reproduce_command 重跑结果 vs 终版回渲
-# （吸收 OpenCV Telea 跨版本/平台舍入差异；不是源 PDF vs 终版，见配置里 reproduce_command/reproduce_image 字段）
 python3 scripts/verify_outputs.py --config verify_config.json --reproduce
-
-# 自测
-cd scripts && python3 -m pytest ../../../tests/scripts/test_skill.py
 ```
 
 ## PDF 封装
 
-编辑完成后的 PNG 需要封装回 PDF。两种方式：
-
-### 方式一：新建 PDF（PyMuPDF）
-
-适合从整页图新建 PDF，按原始页面点尺寸封装。
-
-```bash
-python3 scripts/scan_edit_ops.py package \
-    --source page_final.png \
-    --output final.pdf \
-    --page-size 595.2,841.68 \
-    --title "文档标题" --subject "修改说明"
-```
-
-不给 `--page-size` 时按 `--dpi`（默认 300）从图像尺寸推算。
-
-| 参数 | 说明 | 默认 |
-|---|---|---|
-| `--page-size` | 页面点尺寸 `W,H`（须两个有限正数；非法输入退出码 2） | 按 dpi 推算 |
-| `--dpi` | 无 `--page-size` 时用于推算；须为正整数（`<=0` 退出码 2） | 300 |
-| `--original-pdf` | 若给出则走替换内嵌图模式（保留 OCR）；多图页面按覆盖面积选整页图（同 xref 去重）；全空 rect / 头部并列时会报错 | 无 |
-| `--page-index` | 替换模式下的页码（0-based；须在页数范围内，越界报错） | 0 |
-| `--source-orient` | 替换模式下输入图朝向：`auto`（默认，按尺寸推断）、`displayed`（`export-page --as-displayed` 导出的显示朝向图，/Rotate≠0 时旋回）、`embedded`（内嵌朝向）。/Rotate=180 或正方形图尺寸无法区分朝向，`auto` 会退出码 2，须显式指定（BUG-066） | auto |
-
-### 方式二：替换内嵌图（PyMuPDF，保留 OCR 层）
-
-适合原始 PDF 含 OCR 文字层，只替换整页扫描图。**推荐先用 `export-page` 导出内嵌原生像素**（勿用回渲图再嵌回，会整页重采样）。
+新建 PDF 用 `package --page-size W,H`。保留原 PDF/OCR 层时，必须先用 `extract`
+取得原生像素并通过默认往返检查，再以显示朝向图坐标声明允许修改区：
 
 ```bash
 # 导出内嵌整页图；有 /Rotate 时加 --as-displayed 得到阅读器朝向，便于编辑
-python3 scripts/scan_edit_ops.py export-page \
+python3 scripts/scan_edit_ops.py extract \
     --pdf source.pdf --output page.png --page-index 0 --as-displayed
 
 # 编辑后回封；显示朝向图加 --source-orient displayed（/Rotate≠0 时自动旋回内嵌朝向）
@@ -455,39 +475,21 @@ python3 scripts/scan_edit_ops.py package \
     --source page_final.png \
     --output final.pdf \
     --original-pdf source.pdf \
-    --page-index 0 --source-orient displayed
+    --page-index 0 --source-orient displayed \
+    --audit-allowed-boxes "x1,y1,x2,y2"
 ```
 
-`package --original-pdf` 按 `--source-orient` 处理朝向：`displayed` 时按 `/Rotate` 旋回内嵌朝向；`auto`（默认）按尺寸推断（仅 /Rotate=90/270 且宽高互换时可靠），**/Rotate=180 或正方形图尺寸无法区分朝向，`auto` 会退出码 2，须显式 `--source-orient` 指定**（BUG-066）。尺寸既非内嵌也非显示朝向也退出码 2（拒绝静默重采样）。
+`package --original-pdf` 先写候选临时 PDF，再强制验证内嵌图 diff=0、全部未修改页哈希一致、
+300dpi 允许区外变化=0；任一失败即删除候选，不覆盖交付文件。`export-page` 保留为 `extract` 兼容别名。
+完整封装参数与新建 PDF 示例见 [`references/scripts_reference.md`](references/scripts_reference.md)。
 
 ## 工具参考
 
 各脚本的完整参数表、字体注册目录与安装引导见 [`references/scripts_reference.md`](references/scripts_reference.md)。要点速查：
 
-- **scan_edit_ops.py**：`remove` / `move` / `replace` / `compound` / `package` / `export-page` / `verify`。
-- **locate_content.py**：`lines` / `glyphs` / `donors`——行带、字框、供体尺寸候选定位。
-- **scan_text_fusion.py**：增加/替换文字的融合引擎。关键参数 `--ink-color`（显式 > `--reference-box` 采样 > 默认）、`--stroke-shoulder`、`--core-alpha-scale`、`--preview-ink`。
-- **identify_font.py**：NCC 排名 + 密度门禁（默认阻断；`--allow-degraded` 降级）+ `回填参数: --font "…"`。
-- **identify_size.py**：`--font` 须填上一步识别的完整注册名/路径，否则级联失败。
-- **align_text.py**：墨迹垂直重心对齐，算出调整后 Y 给 `--position` 用。
-- **font_registry.py**：`--font` 三写法（路径/完整注册名/文件名），含 macOS `~/Library/Fonts`。
-- **check_fonts.py**：CJK 字体安装状态检查 + 平台安装引导 + `--source-dir` 自动复制。
-- **sync_install.sh**：将仓库技能镜像同步到 `~/.agents/skills` 与 `~/.claude/skills`（避免版本漂移）。
-
-## 调参安全范围
-
-| 参数 | 建议范围 | 单步幅度 |
-|---|---|---|
-| `--fusion-strength` | 0.3~1.2（干净扫描 0.3~0.5） | ±0.05~0.1 |
-| `--halo-strength` | 0.7~1.3 | ±0.05~0.1 |
-| `--ink-color`（每通道） | 参考值 ±5 | ±2~4 |
-| `--position` Y | 已对齐后尽量不动 | ±2px |
-| `--font-size` | 参考字高 ±1 | 1 |
-| 供体对比度倍率 | 通常 0.95~1.05 | - |
-| 羽化宽度 | 3~5 px | 1 |
-| 移动量 | 实测行距 | 不估 |
-| 墨迹阈值 | 160~246（视扫描质量） | - |
-| 修补半径 | 3~7 | - |
+- 编辑闭环：`scan_edit_ops.py`；定位：`locate_content.py`；测量：`measure_layout.py`。
+- 字体/字号/对齐：`identify_font.py`、`identify_size.py`、`align_text.py`。
+- 加字融合：`scan_text_fusion.py`；批量验证：`verify_outputs.py`；字体环境：`check_fonts.py`。
 
 ## 详细方法论
 

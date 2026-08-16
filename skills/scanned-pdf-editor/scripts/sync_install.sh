@@ -34,5 +34,5 @@ sync_one "$HOME/.claude/skills/scanned-pdf-editor"
 if [[ -f "$VERSION_FILE" ]]; then
   echo "repo VERSION: $(tr -d '[:space:]' < "$VERSION_FILE")"
 fi
-grep -E '^version:' "$SRC/SKILL.md" | head -1
+echo "skill version: $(grep -Eo 'V[0-9]+\.[0-9]+\.[0-9]+' "$SRC/SKILL.md" | head -1)"
 echo "OK: install copies match repo skill."

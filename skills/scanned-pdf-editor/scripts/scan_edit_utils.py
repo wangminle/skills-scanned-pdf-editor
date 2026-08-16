@@ -34,6 +34,29 @@ class DiffStats:
     bbox: Box | None
 
 
+@dataclass(frozen=True)
+class PlacementAnalysis:
+    """供体贴入后的像素几何审计结果。"""
+
+    inserted_ink_bbox: Box | None
+    collision_pixels: int
+    nearest_gap_px: float | None
+    left_gap_px: int | None
+    right_gap_px: int | None
+    baseline_delta_px: int | None
+    center_delta_px: float | None
+
+
+@dataclass(frozen=True)
+class RenderAudit:
+    """原 PDF 与成品 PDF 在指定 dpi 下的区外差分。"""
+
+    changed_pixels: int
+    changed_bbox: Box | None
+    outside_allowed: int
+    render_size: tuple[int, int]
+
+
 # ───────────────────────────── PDF 渲染与封装 ─────────────────────────────
 
 
@@ -58,6 +81,35 @@ def render_pdf_page(
         # 因此传 rotation=get_rotation() 会双重旋转（BUG-058）。正确做法是
         # rotation=0，让 PDFium 自行处理 /Rotate，输出即用户在阅读器中看到的朝向。
         image = page.render(scale=dpi / 72, rotation=0).to_pil().convert("RGB")
+    finally:
+        document.close()
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(output_path, dpi=(dpi, dpi))
+    return image
+
+
+def render_pdf_page_mupdf(
+    pdf_path: Path,
+    output_path: Path | None = None,
+    *,
+    page_index: int = 0,
+    dpi: int = 300,
+) -> Image.Image:
+    """使用与原生提取/替换相同的 MuPDF 解码链回渲单页。
+
+    像素闭环审计必须使用本函数：PDFium 对同一 RGB 像素的 JPEG XObject 与
+    PNG XObject 会走不同色彩解码路径，可能产生全页差异；MuPDF 与提取用的
+    ``fitz.Pixmap`` 同链，能验证实际编辑像素是否在允许区外保持不变。
+    """
+    import fitz
+
+    document = fitz.open(str(pdf_path))
+    try:
+        if not 0 <= page_index < len(document):
+            raise IndexError(f"页码越界: {page_index + 1}/{len(document)}")
+        pixmap = document[page_index].get_pixmap(dpi=dpi, alpha=False)
+        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
     finally:
         document.close()
     if output_path is not None:
@@ -304,6 +356,135 @@ def extract_embedded_page_image(
         document.close()
 
 
+def embedded_page_image_hash(pdf_path: Path, *, page_index: int = 0) -> str:
+    """计算目标页整页扫描图的原生 RGB 像素哈希。
+
+    哈希包含宽高和像素字节，不受 PDF 压缩格式、对象编号或 PNG/JPEG 容器影响，
+    适合证明未修改页面的视觉源像素完全未变。
+    """
+    meta = extract_embedded_page_image(
+        pdf_path, page_index=page_index, as_displayed=False
+    )
+    arr = np.asarray(meta.image.convert("RGB"), dtype=np.uint8)
+    digest = sha256()
+    digest.update(f"{arr.shape[1]}x{arr.shape[0]}:RGB\n".encode("ascii"))
+    digest.update(arr.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def compare_unmodified_page_hashes(
+    source_pdf: Path,
+    final_pdf: Path,
+    *,
+    modified_pages: Iterable[int],
+) -> dict[int, tuple[str, str]]:
+    """比较所有未修改页的整页扫描图哈希，返回不一致页。"""
+    source_pages, _ = pdf_page_info(source_pdf)
+    final_pages, _ = pdf_page_info(final_pdf)
+    if source_pages != final_pages:
+        raise ValueError(f"源 PDF 与终版页数不一致: {source_pages} != {final_pages}")
+    excluded = set(modified_pages)
+    mismatches: dict[int, tuple[str, str]] = {}
+    for page_index in range(source_pages):
+        if page_index in excluded:
+            continue
+        before = embedded_page_image_hash(source_pdf, page_index=page_index)
+        after = embedded_page_image_hash(final_pdf, page_index=page_index)
+        if before != after:
+            mismatches[page_index] = (before, after)
+    return mismatches
+
+
+def scale_boxes(
+    boxes: Iterable[Box],
+    *,
+    from_size: tuple[int, int],
+    to_size: tuple[int, int],
+    padding: int = 0,
+) -> list[Box]:
+    """把像素框从一个栅格尺寸保守映射到另一个栅格尺寸。"""
+    import math
+
+    fw, fh = from_size
+    tw, th = to_size
+    if min(fw, fh, tw, th) <= 0:
+        raise ValueError("映射尺寸必须为正数")
+    sx, sy = tw / fw, th / fh
+    out: list[Box] = []
+    for x1, y1, x2, y2 in boxes:
+        nx1 = max(0, math.floor(x1 * sx) - padding)
+        ny1 = max(0, math.floor(y1 * sy) - padding)
+        nx2 = min(tw, math.ceil(x2 * sx) + padding)
+        ny2 = min(th, math.ceil(y2 * sy) + padding)
+        if nx1 >= nx2 or ny1 >= ny2:
+            raise ValueError(f"允许框 {x1,y1,x2,y2} 映射后为空")
+        out.append((nx1, ny1, nx2, ny2))
+    return out
+
+
+def audit_pdf_render_outside_boxes(
+    source_pdf: Path,
+    final_pdf: Path,
+    *,
+    page_index: int,
+    allowed_boxes: Iterable[Box],
+    boxes_size: tuple[int, int],
+    dpi: int = 300,
+    padding: int = 2,
+) -> RenderAudit:
+    """300dpi 回渲并验证声明允许区外无任何变化。
+
+    ``allowed_boxes`` 使用阅读器显示朝向的提取图坐标。允许区不靠宽高比例猜测，
+    而是构造黑底/白框两份掩模 PDF，经原页相同的 XObject 放置矩阵和 /Rotate
+    双回渲，以两者差分得到准确的回渲允许像素；这能覆盖旋转页与非等比放置。
+    """
+    before = np.asarray(render_pdf_page_mupdf(source_pdf, page_index=page_index, dpi=dpi))
+    after = np.asarray(render_pdf_page_mupdf(final_pdf, page_index=page_index, dpi=dpi))
+    if before.shape != after.shape:
+        raise ValueError(
+            f"{dpi}dpi 回渲尺寸不一致: {before.shape[:2]} != {after.shape[:2]}"
+        )
+    render_size = (after.shape[1], after.shape[0])
+    meta = extract_embedded_page_image(
+        source_pdf, page_index=page_index, as_displayed=True
+    )
+    if boxes_size != meta.displayed_size:
+        raise ValueError(
+            f"允许框坐标基准 {boxes_size} 与显示朝向提取图 {meta.displayed_size} 不一致"
+        )
+    allowed_list = list(allowed_boxes)
+    if not allowed_list:
+        raise ValueError("回渲审计至少需要一个允许框")
+
+    from tempfile import TemporaryDirectory
+
+    displayed_black = np.zeros((boxes_size[1], boxes_size[0], 3), dtype=np.uint8)
+    displayed_white = displayed_black.copy()
+    for x1, y1, x2, y2 in allowed_list:
+        if x1 < 0 or y1 < 0 or x2 > boxes_size[0] or y2 > boxes_size[1]:
+            raise ValueError(f"允许框 {x1,y1,x2,y2} 越出显示提取图 {boxes_size}")
+        displayed_white[y1:y2, x1:x2] = 255
+    black_embedded = orient_displayed_to_embedded(Image.fromarray(displayed_black), meta.rotate)
+    white_embedded = orient_displayed_to_embedded(Image.fromarray(displayed_white), meta.rotate)
+    with TemporaryDirectory(prefix="scan-render-mask-") as temp_dir:
+        black_pdf = Path(temp_dir) / "black.pdf"
+        white_pdf = Path(temp_dir) / "white.pdf"
+        replace_pdf_image(source_pdf, black_pdf, black_embedded, page_index=page_index)
+        replace_pdf_image(source_pdf, white_pdf, white_embedded, page_index=page_index)
+        black_render = np.asarray(render_pdf_page_mupdf(black_pdf, page_index=page_index, dpi=dpi))
+        white_render = np.asarray(render_pdf_page_mupdf(white_pdf, page_index=page_index, dpi=dpi))
+    allowed_mask = np.any(black_render != white_render, axis=2)
+    if padding > 0:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (padding * 2 + 1, padding * 2 + 1)
+        )
+        allowed_mask = cv2.dilate(allowed_mask.astype(np.uint8), kernel) > 0
+    stats = image_diff(before, after)
+    changed = np.any(before != after, axis=2)
+    outside = int(np.count_nonzero(changed & ~allowed_mask))
+    return RenderAudit(stats.changed_pixels, stats.bbox, outside, render_size)
+
+
 def prepare_image_for_pdf_replace(
     image: Image.Image,
     *,
@@ -316,7 +497,7 @@ def prepare_image_for_pdf_replace(
 
     ``source_orient`` 决定如何理解输入图朝向：
 
-    - ``"displayed"``：输入是阅读器显示朝向图（来自 ``export-page --as-displayed``）。
+    - ``"displayed"``：输入是阅读器显示朝向图（来自 ``extract --as-displayed``）。
       若 /Rotate≠0，无条件旋回内嵌朝向。尺寸仅用于校验合法性。
     - ``"embedded"``：输入已是内嵌朝向，原样返回（尺寸须匹配）。
     - ``"auto"``（默认，向后兼容）：按尺寸推断——仅在 /Rotate=90/270 且宽高互换
@@ -339,7 +520,7 @@ def prepare_image_for_pdf_replace(
         if (w, h) != (dw, dh):
             raise ValueError(
                 f"编辑图尺寸 {w}×{h} 与显示朝向 {dw}×{dh} 不匹配；"
-                "--source-orient=displayed 要求输入为 export-page --as-displayed 导出的显示朝向图。"
+                "--source-orient=displayed 要求输入为 extract --as-displayed 导出的显示朝向图。"
             )
         return orient_displayed_to_embedded(image.convert("RGB"), rot)
 
@@ -357,7 +538,7 @@ def prepare_image_for_pdf_replace(
             return image.convert("RGB")
         raise ValueError(
             f"编辑图尺寸 {w}×{h} 与内嵌图 {ew}×{eh} 均不匹配（/Rotate=0）；"
-            "请用 export-page 导出后编辑，避免对回渲图重采样回封。"
+            "请用 extract 导出后编辑，避免对回渲图重采样回封。"
         )
 
     # /Rotate≠0 且 displayed 尺寸≠embedded 尺寸（典型 90/270 非正方形）：尺寸可区分
@@ -369,7 +550,7 @@ def prepare_image_for_pdf_replace(
             return orient_displayed_to_embedded(image.convert("RGB"), rot)
         raise ValueError(
             f"编辑图尺寸 {w}×{h} 与内嵌图 {ew}×{eh}、显示朝向 {dw}×{dh} 均不匹配；"
-            "请用 export-page 导出内嵌/显示图后编辑，避免对回渲图重采样回封。"
+            "请用 extract 导出内嵌/显示图后编辑，避免对回渲图重采样回封。"
         )
 
     # /Rotate≠0 但 displayed 尺寸==embedded 尺寸（/Rotate=180 或正方形 90/270）：
@@ -377,7 +558,7 @@ def prepare_image_for_pdf_replace(
     raise ValueError(
         f"/Rotate={rot} 但显示尺寸 {dw}×{dh} 与内嵌尺寸 {ew}×{eh} 相同，"
         "尺寸无法判定输入图朝向。请显式指定："
-        "export-page --as-displayed 导出编辑后用 --source-orient displayed；"
+        "extract --as-displayed 导出编辑后用 --source-orient displayed；"
         "或编辑内嵌图后用 --source-orient embedded。"
     )
 
@@ -606,6 +787,7 @@ def move_block(
     source_y: tuple[int, int],
     shift_y: int,
     cleanup_boxes: Iterable[Box] | None = None,
+    cleanup_mode: str = "auto",
     cleanup_ink_threshold: int = 246,
 ) -> tuple[np.ndarray, np.ndarray]:
     """上移原扫描像素块，并清理原位置的残留墨迹。
@@ -614,7 +796,9 @@ def move_block(
         content_x: 移动区域横向范围 (x1, x2)
         source_y: 移动区域纵向范围 (y1, y2)
         shift_y: 上移像素数（正值=上移）
-        cleanup_boxes: 需要清理残留墨迹的区域；不给则自动用源区域尾部
+        cleanup_boxes: 手动清理区域
+        cleanup_mode: ``auto``=只用自动尾部框；``add``=自动框加手动框；
+                      ``replace``=只用手动框
 
     返回 (移动后图像, 清理蒙版)。
     """
@@ -649,11 +833,26 @@ def move_block(
     result = image.copy()
     result[y1 - shift_y : y2 - shift_y, x1:x2] = image[y1:y2, x1:x2]
 
-    if cleanup_boxes is None:
-        cleanup_boxes = [(x1, y2 - shift_y, x2, y2)]
+    if cleanup_mode not in {"auto", "add", "replace"}:
+        raise ValueError(f"未知 cleanup_mode: {cleanup_mode!r}")
+    manual = list(cleanup_boxes or [])
+    automatic = [(x1, y2 - shift_y, x2, y2)]
+    if cleanup_mode == "auto":
+        if manual:
+            raise ValueError(
+                "cleanup_mode=auto 不接受 cleanup_boxes；"
+                "要追加手动框请用 add，要完全替代自动框请用 replace。"
+            )
+        effective_cleanup = automatic
+    elif cleanup_mode == "add":
+        effective_cleanup = automatic + manual
+    else:
+        if not manual:
+            raise ValueError("cleanup_mode=replace 必须提供至少一个 cleanup_box")
+        effective_cleanup = manual
 
     mask = ink_mask_in_boxes(
-        image, cleanup_boxes, threshold=cleanup_ink_threshold, dilation=5
+        image, effective_cleanup, threshold=cleanup_ink_threshold, dilation=5
     )
     return inpaint_rgb(result, mask), mask
 
@@ -868,6 +1067,93 @@ def replace_with_donor(
         feather=feather, normalize_mode=normalize_mode,
     )
     return result, mask, scale
+
+
+def ink_bbox(
+    image: np.ndarray, box: Box | None = None, *, threshold: int = 220
+) -> Box | None:
+    """返回阈值内墨迹的最小外接框（整图坐标），无墨迹返回 ``None``。"""
+    h, w = image.shape[:2]
+    if box is None:
+        x1, y1, x2, y2 = 0, 0, w, h
+    else:
+        x1, y1, x2, y2 = box
+        if x1 < 0 or y1 < 0 or x2 > w or y2 > h or x1 >= x2 or y1 >= y2:
+            raise ValueError(f"墨迹测量框 {box} 越界或为空（图像 {w}×{h}）")
+    mask = luma(image[y1:y2, x1:x2]) < threshold
+    ys, xs = np.where(mask)
+    if not len(xs):
+        return None
+    return (
+        x1 + int(xs.min()), y1 + int(ys.min()),
+        x1 + int(xs.max()) + 1, y1 + int(ys.max()) + 1,
+    )
+
+
+def analyze_replace_placement(
+    before_paste: np.ndarray,
+    after_paste: np.ndarray,
+    *,
+    destination_box: Box,
+    reference_box: Box,
+    threshold: int = 220,
+) -> PlacementAnalysis:
+    """分析供体与保留墨迹的碰撞、距离和基线偏差。"""
+    if before_paste.shape != after_paste.shape:
+        raise ValueError("贴入前后图像尺寸不一致")
+    x1, y1, x2, y2 = destination_box
+    h, w = before_paste.shape[:2]
+    if x1 < 0 or y1 < 0 or x2 > w or y2 > h or x1 >= x2 or y1 >= y2:
+        raise ValueError(f"destination_box={destination_box} 越界或为空")
+
+    existing = luma(before_paste) < threshold
+    changed = np.any(before_paste != after_paste, axis=2)
+    inserted = (luma(after_paste) < threshold) & changed
+    footprint = np.zeros((h, w), dtype=bool)
+    footprint[y1:y2, x1:x2] = True
+    inserted &= footprint
+    ys, xs = np.where(inserted)
+    inserted_bbox: Box | None = None
+    if len(xs):
+        inserted_bbox = (
+            int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+        )
+
+    collision = int(np.count_nonzero(inserted & existing))
+    nearest: float | None = None
+    left_gap: int | None = None
+    right_gap: int | None = None
+    baseline_delta: int | None = None
+    center_delta: float | None = None
+
+    if inserted_bbox:
+        # 欧氏最近距离：碰撞时为 0；排除供体目标框内部，避免把待替换残留算邻字。
+        neighbours = existing.copy()
+        neighbours[y1:y2, x1:x2] = False
+        if neighbours.any():
+            distance = cv2.distanceTransform((~neighbours).astype(np.uint8), cv2.DIST_L2, 5)
+            nearest = 0.0 if collision else float(distance[inserted].min())
+
+        ix1, iy1, ix2, iy2 = inserted_bbox
+        row_neighbours = neighbours[iy1:iy2]
+        ny, nx = np.where(row_neighbours)
+        if len(nx):
+            left = nx[nx < ix1]
+            right = nx[nx >= ix2]
+            if len(left):
+                left_gap = int(ix1 - left.max() - 1)
+            if len(right):
+                right_gap = int(right.min() - ix2)
+
+        reference_ink = ink_bbox(before_paste, reference_box, threshold=threshold)
+        if reference_ink:
+            baseline_delta = int(iy2 - reference_ink[3])
+            center_delta = ((iy1 + iy2) - (reference_ink[1] + reference_ink[3])) / 2.0
+
+    return PlacementAnalysis(
+        inserted_bbox, collision, nearest, left_gap, right_gap,
+        baseline_delta, center_delta,
+    )
 
 
 # ───────────────────────────── 差分与验证 ─────────────────────────────

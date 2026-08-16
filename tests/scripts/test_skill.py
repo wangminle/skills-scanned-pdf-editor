@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import os
+import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -224,6 +226,34 @@ class TestFontRegistry(unittest.TestCase):
                 font_registry.FONT_DIRS = old_dirs
         finally:
             shutil.rmtree(tmpdir)
+
+    def test_songti_registry_maps_regular_weight(self):
+        """「Songti SC」裸名应指 Regular（Songti.ttc idx 6），不再是 Black（idx 0）。
+
+        20260816 复测：细笔画文书（仿宋系）识别时 Black 映射导致 Songti 得分失真。
+        仅在本机存在 Songti.ttc 时校验路径可解析；索引值无条件校验注册表。
+        """
+        self.assertEqual(font_registry.CJK_FONTS["Songti SC"][1], 6)
+        self.assertEqual(font_registry.CJK_FONTS["Songti SC Light"][1], 3)
+        res = font_registry.find_font("Songti SC Light")
+        if res is not None:
+            path, idx = res
+            self.assertEqual(Path(path).name.lower(), "songti.ttc")
+            self.assertEqual(idx, 3)
+
+    def test_candidates_spec_supports_ttc_index(self):
+        """--candidates 支持 名称=文件名[索引]；不写索引默认 0（20260816 复测修复）。"""
+        import identify_font as idf
+        cands = idf.parse_candidates_spec("甲=foo.ttf,乙=bar.ttc[3],丙=x.ttf[0]")
+        self.assertEqual(cands["甲"], ("foo.ttf", 0))
+        self.assertEqual(cands["乙"], ("bar.ttc", 3))
+        self.assertEqual(cands["丙"], ("x.ttf", 0))
+        # BUG-046 行为保持：尾逗号空项过滤
+        self.assertEqual(idf.parse_candidates_spec("甲=foo.ttf,"), {"甲": ("foo.ttf", 0)})
+        # 缺 '=' 退出码 2
+        with self.assertRaises(SystemExit) as ctx:
+            idf.parse_candidates_spec("foo.ttf")
+        self.assertEqual(ctx.exception.code, 2)
 
 
 class TestScanTextFusion(unittest.TestCase):
@@ -449,6 +479,7 @@ class TestScanEditOpsCLI(unittest.TestCase):
             "--source", str(new_png),
             "--output", str(output),
             "--original-pdf", str(original),
+            "--audit-allowed-boxes", "10,10,30,30",
         ])
         self.assertEqual(ret, 0)
         self.assertTrue(output.exists())
@@ -1887,9 +1918,11 @@ class TestBugFix048_051(unittest.TestCase):
         import inspect
         import verify_outputs as vo
         src = inspect.getsource(vo.render_case_page)
-        self.assertIn("try:", src, "pymupdf 路径应有 try/finally")
-        self.assertIn("finally:", src)
-        self.assertIn("document.close()", src)
+        self.assertIn("render_pdf_page_mupdf", src)
+        helper = inspect.getsource(utils.render_pdf_page_mupdf)
+        self.assertIn("try:", helper, "pymupdf 共用渲染器应有 try/finally")
+        self.assertIn("finally:", helper)
+        self.assertIn("document.close()", helper)
 
     def test_render_case_page_pymupdf_rejects_out_of_range_page_index(self):
         """pymupdf 后端 page_index 越界应报 IndexError 而非回绕到末页。"""
@@ -2363,13 +2396,19 @@ class TestCheckFonts(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(completed.returncode, 0)
-            self.assertIn("未找到", completed.stdout)
+            self.assertTrue(
+                "未找到" in completed.stdout or "无需" in completed.stdout,
+                completed.stdout,
+            )
         finally:
             empty_dir.rmdir()
 
     def test_cli_source_dir_copies_font(self):
         """--source-dir 找到字体文件时应复制到目标目录。"""
         import check_fonts
+        installed, _missing = check_fonts.check_all(["仿宋"])
+        if installed:
+            self.skipTest("本机已安装仿宋，CLI 不应重复复制已安装字体")
         # 创建临时源目录，放入一个假字体文件
         src_dir = Path(tempfile.mkdtemp())
         font_file = src_dir / "simfang.ttf"
@@ -2794,6 +2833,7 @@ class TestExportPageAndRotatePackage(unittest.TestCase):
         ret = ops.main([
             "package", "--source", str(src), "--output", str(out),
             "--original-pdf", str(pdf),
+            "--audit-allowed-boxes", "32,0,40,8",
         ])
         self.assertEqual(ret, 0)
         # 回读内嵌图应为横向
@@ -3010,6 +3050,7 @@ class TestBugFix066_SourceOrient(unittest.TestCase):
         ret = ops.main([
             "package", "--source", str(src), "--output", str(out),
             "--original-pdf", str(pdf), "--source-orient", "displayed",
+            "--audit-allowed-boxes", "0,0,1,1",
         ])
         self.assertEqual(ret, 0)
         back = utils.extract_embedded_page_image(out, as_displayed=False)
@@ -3076,6 +3117,197 @@ class TestFontQualityGate(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertIn("回填参数", completed.stdout)
+
+
+class TestBugFix069_OutputPathRejected(unittest.TestCase):
+    """BUG-069：--output 带路径成分时曾静默嵌套落盘到 output_dir/<原路径>。
+
+    契约：--output 只是 --output-dir 内的文件名；带相对/绝对路径应在 CLI 层拒绝（退出码 2）。
+    """
+
+    def setUp(self):
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体，跳过融合测试")
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+        src = Path(self.tmpdir) / "src.png"
+        Image.new("RGB", (300, 200), (245, 245, 245)).save(src)
+        self.src = src
+
+    def _common_args(self):
+        return ["--source", str(self.src), "--text", "测", "--position", "10", "10",
+                "--font-size", "20"]
+
+    def test_relative_path_output_rejected(self):
+        import scan_text_fusion as stf
+        with self.assertRaises(SystemExit) as ctx:
+            stf.main(self._common_args() + ["--output", "sub/x.png"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_absolute_path_output_rejected(self):
+        import scan_text_fusion as stf
+        with self.assertRaises(SystemExit) as ctx:
+            stf.main(self._common_args() + ["--output", str(Path(self.tmpdir) / "x.png")])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_parent_component_output_rejected(self):
+        import scan_text_fusion as stf
+        with self.assertRaises(SystemExit) as ctx:
+            stf.main(self._common_args() + ["--output", "../x.png"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_bare_filename_still_works(self):
+        import scan_text_fusion as stf
+        out_dir = Path(self.tmpdir) / "fusion_out"
+        ret = stf.main(self._common_args() + ["--output-dir", str(out_dir), "--output", "ok.png"])
+        self.assertEqual(ret, 0)
+        self.assertTrue((out_dir / "ok.png").exists())
+        self.assertFalse((out_dir / "ok.png" / "ok.png").exists())
+
+
+class TestPixelAuditIteration20260816(unittest.TestCase):
+    """CHK-043：像素审计闭环、测量与清理模式。"""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+    def _make_pdf(self, pages=2):
+        import fitz
+        doc = fitz.open()
+        for index in range(pages):
+            arr = np.full((80, 120, 3), 245 - index * 5, dtype=np.uint8)
+            arr[10:25, 10 + index * 20:30 + index * 20] = 30 + index * 10
+            png = self.tmpdir / f"p{index}.png"
+            Image.fromarray(arr).save(png)
+            page = doc.new_page(width=120, height=80)
+            page.insert_image(page.rect, filename=str(png))
+        pdf = self.tmpdir / "source.pdf"
+        doc.save(str(pdf))
+        doc.close()
+        return pdf
+
+    def test_move_cleanup_modes_are_explicit(self):
+        image = np.full((100, 100, 3), 250, dtype=np.uint8)
+        image[50:60, 20:80] = 20
+        image[80:85, 5:10] = 20
+        with self.assertRaisesRegex(ValueError, "add.*replace"):
+            utils.move_block(
+                image, content_x=(20, 80), source_y=(50, 60), shift_y=10,
+                cleanup_boxes=[(5, 80, 10, 85)], cleanup_mode="auto",
+            )
+        _result, mask = utils.move_block(
+            image, content_x=(20, 80), source_y=(50, 60), shift_y=10,
+            cleanup_boxes=[(5, 80, 10, 85)], cleanup_mode="add",
+        )
+        self.assertGreater(int(mask[80:85, 5:10].sum()), 0)
+        self.assertGreater(int(mask[50:60, 20:80].sum()), 0)
+
+    def test_default_blank_thresholds_catch_light_residue(self):
+        import scan_edit_ops as ops
+        image = np.full((30, 30, 3), 255, dtype=np.uint8)
+        image[10, 10] = 210
+        path = self.tmpdir / "light.png"
+        Image.fromarray(image).save(path)
+        ret = ops.main([
+            "verify", "--source", str(path), "--result", str(path),
+            "--blank-box", "0,0,30,30",
+        ])
+        self.assertEqual(ret, 1)
+        ret_legacy = ops.main([
+            "verify", "--source", str(path), "--result", str(path),
+            "--blank-box", "0,0,30,30", "--blank-threshold", "180",
+        ])
+        self.assertEqual(ret_legacy, 0)
+
+    def test_placement_analysis_reports_gap_and_baseline(self):
+        before = np.full((50, 80, 3), 255, dtype=np.uint8)
+        before[20:30, 10:12] = 20
+        before[20:30, 40:45] = 20
+        after = before.copy()
+        after[20:30, 14:18] = 20
+        report = utils.analyze_replace_placement(
+            before, after,
+            destination_box=(14, 20, 18, 30),
+            reference_box=(40, 20, 45, 30),
+            threshold=220,
+        )
+        self.assertEqual(report.collision_pixels, 0)
+        self.assertEqual(report.left_gap_px, 2)
+        self.assertEqual(report.baseline_delta_px, 0)
+        self.assertIsNotNone(report.nearest_gap_px)
+
+    def test_measure_layout_shift_json(self):
+        import contextlib
+        import io
+        import measure_layout
+        image = np.full((80, 80, 3), 255, dtype=np.uint8)
+        image[40:50, 10:20] = 10
+        image[20:30, 40:50] = 10
+        path = self.tmpdir / "measure.png"
+        Image.fromarray(image).save(path)
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            ret = measure_layout.main([
+                "shift", "--source", str(path),
+                "--source-box", "5,35,25,55", "--target-box", "35,15,55,35",
+            ])
+        self.assertEqual(ret, 0)
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(payload["top_shift_px"], 20)
+        self.assertEqual(payload["baseline_shift_px"], 20)
+
+    def test_extract_roundtrip_and_unmodified_hashes(self):
+        import scan_edit_ops as ops
+        pdf = self._make_pdf(2)
+        extracted = self.tmpdir / "page.png"
+        ret = ops.main([
+            "extract", "--pdf", str(pdf), "--page-index", "0",
+            "--output", str(extracted),
+        ])
+        self.assertEqual(ret, 0)
+        self.assertTrue(extracted.exists())
+
+        edited = np.asarray(Image.open(extracted).convert("RGB")).copy()
+        edited[40:45, 60:65] = 0
+        edited_path = self.tmpdir / "edited.png"
+        Image.fromarray(edited).save(edited_path)
+        final = self.tmpdir / "final.pdf"
+        ret = ops.main([
+            "package", "--source", str(edited_path), "--output", str(final),
+            "--original-pdf", str(pdf), "--source-orient", "embedded",
+            "--audit-allowed-boxes", "60,40,65,45",
+        ])
+        self.assertEqual(ret, 0)
+        self.assertEqual(
+            utils.compare_unmodified_page_hashes(pdf, final, modified_pages={0}), {}
+        )
+
+    def test_package_requires_declared_allowed_area(self):
+        import scan_edit_ops as ops
+        pdf = self._make_pdf(1)
+        meta = utils.extract_embedded_page_image(pdf)
+        image_path = self.tmpdir / "page.png"
+        meta.image.save(image_path)
+        output = self.tmpdir / "should-not-exist.pdf"
+        ret = ops.main([
+            "package", "--source", str(image_path), "--output", str(output),
+            "--original-pdf", str(pdf), "--source-orient", "embedded",
+        ])
+        self.assertEqual(ret, 2)
+        self.assertFalse(output.exists())
+
+    def test_verify_config_defaults_to_three_residual_thresholds(self):
+        import verify_outputs
+        config = self.tmpdir / "verify.json"
+        config.write_text(json.dumps([{
+            "name": "x", "source_pdf": "a.pdf", "final_pdf": "b.pdf",
+            "blank_box": [0, 0, 1, 1],
+        }]), encoding="utf-8")
+        case = verify_outputs.load_config(config)[0]
+        self.assertEqual(case.blank_thresholds, (180, 220, 240))
+        self.assertEqual(dict(case.blank_dark_limits), {180: 0, 220: 0, 240: 0})
+        self.assertEqual(case.render_backend, "pymupdf")
 
 
 if __name__ == "__main__":

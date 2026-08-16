@@ -1,6 +1,6 @@
 # skills-scanned-pdf-editor
 
-**Version: V0.1.5** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
+**Version: V0.1.6** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
 
 [English](#english) | [中文](#中文)
 
@@ -50,7 +50,7 @@ Two technical routes share the same goal (“looks like the original scan”):
 ```
 .
 ├── README.md                 # This file (repo overview)
-├── VERSION                   # Current version (V0.1.5)
+├── VERSION                   # Current version (V0.1.6)
 ├── CHANGELOG.md              # Release notes
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Session conventions for agents
@@ -61,8 +61,7 @@ Two technical routes share the same goal (“looks like the original scan”):
         ├── SKILL.md          # Agent instructions (source of truth for workflow)
         ├── README.md         # Skill-local quick start & script map
         ├── scripts/          # CLI tools & libraries
-        ├── references/       # Pipeline methodology & script reference
-        └── verify_config.example.json
+        └── references/       # Pipeline methodology & script reference
 ```
 
 There is **no HTTP/RPC service**. The programmable surface is CLI scripts (and the Python modules they call).
@@ -102,6 +101,7 @@ All commands below assume `cd skills/scanned-pdf-editor`.
 | `move` | Shift a native pixel band and clean residue |
 | `replace` | Paste a native donor glyph/word patch |
 | `compound` | Copy → clear multiple boxes → paste (multi-step move) |
+| `extract` | MuPDF native-pixel extraction with round-trip verification |
 | `package` | Wrap result PNG as PDF (new page or replace embedded image / OCR-preserving) |
 | `verify` | Quick pixel checks vs source |
 
@@ -118,7 +118,8 @@ python3 scripts/scan_edit_ops.py replace \
   --destination x,y --reference-box "..." --output out.png
 
 python3 scripts/scan_edit_ops.py package \
-  --source page_final.png --output final.pdf --original-pdf source.pdf
+  --source page_final.png --output final.pdf --original-pdf source.pdf \
+  --audit-allowed-boxes "x1,y1,x2,y2"
 ```
 
 **Add-text path** (Route B):
@@ -133,8 +134,8 @@ python3 scripts/scan_text_fusion.py --source page.png --text "…" \
 **Config-driven verification**:
 
 ```bash
-python3 scripts/verify_outputs.py --config verify_config.example.json
-python3 scripts/verify_outputs.py --config verify_config.example.json --reproduce
+python3 scripts/verify_outputs.py --config verify_config.json
+python3 scripts/verify_outputs.py --config verify_config.json --reproduce
 ```
 
 Full flags and workflow steps: [`skills/scanned-pdf-editor/SKILL.md`](skills/scanned-pdf-editor/SKILL.md).
@@ -153,6 +154,7 @@ Scripts under `scripts/` are importable modules—there is no separate packaged 
 | `identify_font.py` / `identify_size.py` | Measurement CLIs |
 | `align_text.py` | Vertical ink-center alignment for added text |
 | `locate_content.py` | Line-band / glyph / donor candidate localization |
+| `measure_layout.py` | JSON measurements for lines, ink boxes, gaps, baselines, and shifts |
 | `verify_outputs.py` | JSON-driven verification |
 | `sync_install.sh` | Mirror skill into `~/.agents` / `~/.claude` skills dirs |
 
@@ -165,7 +167,7 @@ cd skills/scanned-pdf-editor/scripts
 ./run_checks.sh          # version sync check + ruff + unit + e2e
 ```
 
-`run_checks.sh` runs version consistency (repo `VERSION` vs `SKILL.md` vs install copies), `ruff check`, unit tests (`tests/scripts/test_skill.py`), and basic-tasks e2e (`tests/scripts/test_e2e_basic_tasks.py`). After pulling, run `bash scripts/sync_install.sh` if install copies drift.
+`run_checks.sh` runs version consistency (repo `VERSION` vs `SKILL.md` vs install copies), `ruff check`, unit tests (`tests/scripts/test_skill.py`), and basic-tasks e2e (`tests/scripts/test_e2e_basic_tasks.py`, skipped when the dev-only test assets are absent). After pulling, run `bash scripts/sync_install.sh` if install copies drift.
 
 ### License
 
@@ -217,7 +219,7 @@ cd skills/scanned-pdf-editor/scripts
 ```
 .
 ├── README.md                 # 本文件（仓库总览）
-├── VERSION                   # 当前版本号（V0.1.5）
+├── VERSION                   # 当前版本号（V0.1.6）
 ├── CHANGELOG.md              # 版本说明
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Agent 会话约定
@@ -228,8 +230,7 @@ cd skills/scanned-pdf-editor/scripts
         ├── SKILL.md          # Agent 工作流说明（权威文档）
         ├── README.md         # Skill 内快速开始与脚本索引
         ├── scripts/          # CLI 与工具库
-        ├── references/       # 管线方法论与脚本参考
-        └── verify_config.example.json
+        └── references/       # 管线方法论与脚本参考
 ```
 
 **没有 HTTP/RPC 服务**。可编程面是 CLI 脚本（及其调用的 Python 模块）。
@@ -266,6 +267,7 @@ pip3 install -r requirements.txt
 | `move` | 移动原生像素带并清理残留 |
 | `replace` | 粘贴原生供体字块 |
 | `compound` | 复制 → 多框清除 → 粘贴（复合上移） |
+| `extract` | MuPDF 原生像素安全提取并做往返封装验证 |
 | `package` | 将结果图封装为 PDF（新建页或替换内嵌图 / 可保留 OCR） |
 | `verify` | 相对源图的快速像素检查 |
 
@@ -274,7 +276,8 @@ python3 scripts/scan_edit_ops.py remove \
   --source page.png --boxes "x1,y1,x2,y2" --output out.png
 
 python3 scripts/scan_edit_ops.py package \
-  --source page_final.png --output final.pdf --original-pdf source.pdf
+  --source page_final.png --output final.pdf --original-pdf source.pdf \
+  --audit-allowed-boxes "x1,y1,x2,y2"
 ```
 
 **补录文字（路线 B）**：
@@ -289,8 +292,8 @@ python3 scripts/scan_text_fusion.py --source page.png --text "…" \
 **配置驱动验证**：
 
 ```bash
-python3 scripts/verify_outputs.py --config verify_config.example.json
-python3 scripts/verify_outputs.py --config verify_config.example.json --reproduce
+python3 scripts/verify_outputs.py --config verify_config.json
+python3 scripts/verify_outputs.py --config verify_config.json --reproduce
 ```
 
 完整参数与工作流见 [`SKILL.md`](skills/scanned-pdf-editor/SKILL.md)。
@@ -309,6 +312,7 @@ python3 scripts/verify_outputs.py --config verify_config.example.json --reproduc
 | `identify_font.py` / `identify_size.py` | 测量 CLI |
 | `align_text.py` | 新增文字垂直墨迹中心对齐 |
 | `locate_content.py` | 行带 / 字框 / 供体候选定位 |
+| `measure_layout.py` | 行距 / 墨迹框 / 字距 / 基线 / 移动量 JSON 测量 |
 | `verify_outputs.py` | JSON 驱动验证 |
 | `sync_install.sh` | 同步技能到 `~/.agents` / `~/.claude` |
 
@@ -321,7 +325,7 @@ cd skills/scanned-pdf-editor/scripts
 ./run_checks.sh
 ```
 
-`run_checks.sh` 跑 `ruff check` 全量静态检查 + pytest 套件（测试文件在仓库根 `tests/scripts/test_skill.py`，不随 skill 分发）。编辑后 PDF 的端到端验证用 `verify_outputs.py` 配 JSON 配置驱动（见 skill README）。
+`run_checks.sh` 依次执行版本一致性检查（仓库 `VERSION` vs `SKILL.md` vs 安装副本）、`ruff check`、pytest 单元测试（`tests/scripts/test_skill.py`）和可选的 basic-tasks e2e（`tests/scripts/test_e2e_basic_tasks.py`，测试文件与资产缺失时自动跳过）。编辑后 PDF 的端到端验证用 `verify_outputs.py` 配 JSON 配置驱动（见 skill README）。
 
 ### 许可证
 

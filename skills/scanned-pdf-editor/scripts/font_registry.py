@@ -39,13 +39,22 @@ CJK_FONTS: dict[str, tuple[str, int]] = {
     "微软雅黑 (MSYH)":     ("msyh.ttc", 0),
     # macOS
     "STSong (华文宋体)":   ("STSong.ttf", 0),
-    "Songti SC":           ("Songti.ttc", 0),
+    # Songti.ttc 内含多字重（0=Black/1=Bold/3=Light/4=STSong/6=Regular）。
+    # 「Songti SC」裸名按惯例指 Regular（旧映射 index 0 实为 Black，细笔画文书
+    # 识别曾被误导）；Light/Regular 单列，供细笔画原文（仿宋系）交叉验证。
+    "Songti SC":           ("Songti.ttc", 6),
+    "Songti SC Light":     ("Songti.ttc", 3),
+    "Songti SC Regular":   ("Songti.ttc", 6),
+    "STHeiti Light":       ("STHeiti Light.ttc", 0),
+    "STHeiti Medium":      ("STHeiti Medium.ttc", 0),
     "PingFang SC":         ("PingFang.ttc", 0),
     "Hiragino Sans GB W3": ("Hiragino Sans GB.ttc", 0),
     "Hiragino Sans GB W6": ("Hiragino Sans GB.ttc", 2),
     # Linux / 通用
     "Noto Serif CJK SC":   ("NotoSerifCJKsc.ttc", 0),
     "Noto Sans CJK SC":    ("NotoSansCJKsc.ttc", 0),
+    # Google Fonts 独立发行名（与 CJK 合集 ttc 并存，皆常见）
+    "Noto Sans SC":        ("NotoSansSC.ttf", 0),
     "Source Han Serif SC": ("SourceHanSerifSC.otf", 0),
     "Source Han Sans SC":  ("SourceHanSansSC.otf", 0),
     "WenQuanYi Zen Hei":   ("wqy-zenhei.ttc", 0),

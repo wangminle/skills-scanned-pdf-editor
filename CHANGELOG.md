@@ -2,6 +2,41 @@
 
 本仓库版本号格式：`V主.次.修订`（见根目录 `VERSION`）。发布说明条目可附 Build/日期标签。
 
+## V0.1.6-20260816
+
+按 20260816 全套复测（[[TST-028]] [[CHK-042]]）完成扫描件编辑的安全提取、自动测量、封装门禁、逐页审计闭环，并修复模式 D 分辨率、OCR 定位、字体注册表和 BUG-069 缺口。
+
+### 核心增强
+
+- 新增 `extract`：统一用 `fitz.Pixmap(document, xref)` 解码内嵌整页图，PNG 回读必须 diff=0；默认执行替换回封、300dpi 回渲、未修改页哈希三项往返检查；`export-page` 保留为兼容别名
+- `package --original-pdf` 改为候选临时文件门禁：内嵌编辑图回读 diff=0、所有未修改页原生 RGB 像素哈希一致、MuPDF 300dpi 掩模双回渲允许区外变化=0 后才覆盖输出
+- 新增 `measure_layout.py lines/ink-bbox/gap/shift`，JSON 报告行带、字框、字距、碰撞、基线和移动量
+- `replace` 自动输出 `placement_analysis`，并提供碰撞、最小字距和基线偏差可选阻断参数
+- 空白残影默认同时检查亮度 180/220/240，JSON 配置支持各阈值独立上限，不再写死 180
+- `verify_outputs.py` 默认比较所有未修改页的内嵌整页图像素哈希
+- `move --cleanup-mode auto/add/replace` 明确自动框、追加框、替代框语义，拒绝歧义组合
+
+### 质量与兼容性
+
+- 允许区由黑底/白框掩模 PDF 双回渲映射，正确覆盖 `/Rotate` 与非等比 XObject 放置，不靠尺寸比例猜坐标；审计统一使用与 `fitz.Pixmap` 提取同源的 MuPDF，避免 PDFium 对 JPEG/PNG 容器走不同色彩路径造成全页假差异
+- Skill frontmatter 仅保留 `name` / `description`，符合技能结构校验规范
+- Windows 字体安装目标优先用户级目录；`check_fonts --source-dir` 无论字体是否已安装都验证路径合法性
+- 新增 7 项闭环单测，并以真实三页合同 PDF 执行提取、未修改页哈希和回渲回归
+
+### 复测修复与增强
+
+- **BUG-069**：`scan_text_fusion --output` 带路径成分不再静默嵌套落盘到 `output_dir/<原路径>`，CLI 层拒绝（退出码 2，提示改用 --output-dir）
+- **字体注册表（ADJ-011）**：新增 `Songti SC Light/Regular`（Songti.ttc 字重索引 3/6）、`STHeiti Light/Medium`、`Noto Sans SC (NotoSansSC.ttf)`；「Songti SC」裸名由 index 0（实为 Black）改指 Regular——macOS 本机可用候选 3→8 个，细笔画文书（仿宋系）识别不再被迫用 Black 字重
+- **identify_font --candidates**：支持 `名称=文件名[索引]` 指定 ttc 字重（旧实现硬编码 0，多字重家族坍缩同分）
+- **SKILL.md（DOC-027）**：模式 D 增加「分辨率 × 封装」分支表（内嵌非 200dpi 且保 OCR 层 → export-page 原生分辨率融合 + ink-color 压深，堵 200dpi 融合与 package 尺寸校验的死锁）；新增「内容定位（先 OCR 后像素）」章节（tesseract chi_sim 行映射 + locate_content 双证据、短行 min-ink-ratio 降阈值提示）；`--allow-degraded` 三步决策树；验证表改「封装内嵌图 diff=0 为无损判据、300dpi 回渲仅校验朝向版式」；`--crop-box` 示例修正（scan_edit_ops 逗号 / scan_text_fusion 空格）
+- **basic-tests-readme**：task002 改内嵌原生分辨率路线（原 200dpi 步骤在封装步必失败）；task001 补 PyMuPDF 渲染替代（无 poppler 环境）；通用注意事项补定位双证据/短行/crop-box 三条
+- **scripts_reference**：--output 契约、Songti 多字重映射、--candidates 索引语法
+- **文档一致性收尾（DOC-030）**：scripts_reference 补全 remove/move/replace/compound/verify 完整参数表、identify_size 参数表与 verify_outputs 节（`render_backend` 默认 `pymupdf`）；SKILL.md 短行阈值默认值修正（`locate_content --min-ink-ratio` 实为 0.01）、模式 D 分支表改推荐 `extract`、清理 task007 残留引用；scan_edit_ops 模块说明与 CLI 总描述补全全部子命令（含 extract/export-page 别名）；根 README 移除已删除的 verify_config.example.json（目录树 + 示例命令）、中文检查节对齐 run_checks 实际内容；skill README 门禁注释同步
+
+### 测试与门禁
+
+- 新增 TestBugFix069_OutputPathRejected 4 项 + 字体注册表/candidates 索引 2 项；全套 `run_checks.sh` ✅
+
 ## V0.1.5-Build0343-20260810
 
 按 basic-tests 复盘优先修复：字体回填、内嵌导出/旋转、质量门禁、定位模块、E2E 门禁；追加独立审查发现的 4 项门禁/正确性缺陷修复。

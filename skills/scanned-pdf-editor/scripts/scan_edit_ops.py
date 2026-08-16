@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """扫描版 PDF / 图片局部编辑的统一 CLI。
 
-四种操作模式：
-  remove   - 删除指定区域（墨迹蒙版 + Telea 修补 / 行间插值填底）
-  move     - 移动原生像素块并清理残留
-  replace  - 原生供体替换
-  verify   - 像素级验证
+子命令一览（export-page 为 extract 的兼容旧名）：
+  remove       - 删除指定区域（墨迹蒙版 + Telea 修补 / 行间插值填底）
+  move         - 移动原生像素块并清理残留
+  replace      - 原生供体替换
+  compound     - 复合操作：复制源块 → 清除多个区域 → 粘贴到新位置
+  verify       - 像素级验证
+  package      - 结果图封装为 PDF（新建页，或替换内嵌图、保留 OCR 层）
+  extract      - 安全提取 PDF 页内嵌整页图并默认做往返封装验证
 
 坐标统一使用页面 PNG 的左上角像素坐标，矩形 (x1,y1,x2,y2) 右下不包含。
 
@@ -32,7 +35,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -88,6 +93,17 @@ def parse_ordered_pair(s: str) -> tuple[int, int]:
             "请检查是否写反了起止点。"
         )
     return pair
+
+
+def parse_thresholds(s: str) -> tuple[int, ...]:
+    """解析逗号分隔的亮度阈值并去重保序。"""
+    try:
+        values = tuple(dict.fromkeys(int(part.strip()) for part in s.split(",") if part.strip()))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"阈值须为逗号分隔整数，收到: {s!r}") from exc
+    if not values or any(value < 1 or value > 255 for value in values):
+        raise argparse.ArgumentTypeError(f"阈值须位于 1..255，收到: {s!r}")
+    return values
 
 
 def load_rgb(path: Path) -> np.ndarray:
@@ -184,6 +200,7 @@ def cmd_move(args: argparse.Namespace) -> int:
         source_y=source_y,
         shift_y=shift_y,
         cleanup_boxes=cleanup_boxes,
+        cleanup_mode=args.cleanup_mode,
         cleanup_ink_threshold=args.cleanup_ink_threshold,
     )
 
@@ -212,6 +229,12 @@ def cmd_replace(args: argparse.Namespace) -> int:
     destination = parse_pair(args.destination)
     reference_box = parse_box(args.reference_box)
 
+    erased, _ = utils.remove_regions_telea(
+        source,
+        remove_boxes,
+        ink_threshold=args.ink_threshold,
+        mask_mode=args.mask_mode,
+    )
     result, mask, scale = utils.replace_with_donor(
         source,
         donor_source,
@@ -236,6 +259,49 @@ def cmd_replace(args: argparse.Namespace) -> int:
     print(f"changed_pixels={diff.changed_pixels}")
     if diff.bbox:
         print(f"changed_bbox={diff.bbox}")
+
+    donor_w = donor_box[2] - donor_box[0]
+    donor_h = donor_box[3] - donor_box[1]
+    placement = utils.analyze_replace_placement(
+        erased,
+        result,
+        destination_box=(
+            destination[0], destination[1],
+            destination[0] + donor_w, destination[1] + donor_h,
+        ),
+        reference_box=reference_box,
+        threshold=args.analysis_threshold,
+    )
+    print("placement_analysis=" + json.dumps({
+        "threshold": args.analysis_threshold,
+        "inserted_ink_bbox": placement.inserted_ink_bbox,
+        "collision_pixels": placement.collision_pixels,
+        "nearest_gap_px": placement.nearest_gap_px,
+        "left_gap_px": placement.left_gap_px,
+        "right_gap_px": placement.right_gap_px,
+        "baseline_delta_px": placement.baseline_delta_px,
+        "center_delta_px": placement.center_delta_px,
+    }, ensure_ascii=False))
+    if args.fail_on_collision and placement.collision_pixels:
+        print(f"错误: 供体与保留墨迹相交 {placement.collision_pixels} 像素", file=sys.stderr)
+        return 1
+    if args.min_gap is not None and (
+        placement.nearest_gap_px is None or placement.nearest_gap_px < args.min_gap
+    ):
+        print(
+            f"错误: 最近墨迹距离 {placement.nearest_gap_px} 小于要求 {args.min_gap}",
+            file=sys.stderr,
+        )
+        return 1
+    if args.max_baseline_deviation is not None and (
+        placement.baseline_delta_px is None
+        or abs(placement.baseline_delta_px) > args.max_baseline_deviation
+    ):
+        print(
+            f"错误: 基线偏差 {placement.baseline_delta_px} 超过 ±{args.max_baseline_deviation}px",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
@@ -311,12 +377,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        dark = utils.blank_region_dark_pixels(result, box, threshold=args.blank_threshold)
-        print(f"blank_dark_pixels={dark} (threshold<{args.blank_threshold})")
         limit = args.blank_limit if args.blank_limit is not None else 0
-        if dark > limit:
-            print(f"错误: 空白区深色像素 {dark} 超过上限 {limit}", file=sys.stderr)
-            return 1
+        thresholds = args.blank_thresholds
+        for threshold in thresholds:
+            dark = utils.blank_region_dark_pixels(result, box, threshold=threshold)
+            print(f"blank_dark_pixels={dark} (threshold<{threshold})")
+            if dark > limit:
+                print(
+                    f"错误: 空白区亮度<{threshold} 的像素 {dark} 超过上限 {limit}",
+                    file=sys.stderr,
+                )
+                return 1
 
     if args.preserve_box:
         box = parse_box(args.preserve_box)
@@ -385,10 +456,76 @@ def cmd_package(args: argparse.Namespace) -> int:
                 f"{before[0]}×{before[1]} 旋回内嵌朝向 "
                 f"{image.width}×{image.height}"
             )
-        utils.replace_pdf_image(
-            Path(args.original_pdf), args.output, image,
-            page_index=args.page_index,
+        allowed_boxes = [parse_box(box) for box in (args.audit_allowed_boxes or [])]
+        if not args.skip_render_audit and not allowed_boxes:
+            print(
+                "错误: 保留原 PDF 封装默认启用 300dpi 区外变化门禁，"
+                "必须用 --audit-allowed-boxes 声明允许修改区；"
+                "仅在明确不需要像素审计时使用 --skip-render-audit。",
+                file=sys.stderr,
+            )
+            return 2
+
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        handle = tempfile.NamedTemporaryFile(
+            suffix=".pdf", prefix=".scan-package-", dir=args.output.parent, delete=False
         )
+        handle.close()
+        candidate = Path(handle.name)
+        candidate.unlink(missing_ok=True)
+        try:
+            utils.replace_pdf_image(
+                Path(args.original_pdf), candidate, image,
+                page_index=args.page_index,
+            )
+
+            # 门禁 1：回读成品内嵌图，必须与准备封装的 RGB 像素逐像素一致。
+            back = utils.extract_embedded_page_image(
+                candidate, page_index=args.page_index, as_displayed=False
+            )
+            if not np.array_equal(
+                np.asarray(back.image.convert("RGB")), np.asarray(image.convert("RGB"))
+            ):
+                print("错误: 封装后内嵌图与编辑图像素不一致，拒绝交付。", file=sys.stderr)
+                return 1
+            print("embedded_roundtrip_diff=0")
+
+            # 门禁 2：所有未修改页的原生扫描图像素哈希必须保持一致。
+            mismatches = utils.compare_unmodified_page_hashes(
+                Path(args.original_pdf), candidate, modified_pages={args.page_index}
+            )
+            if mismatches:
+                pages = ", ".join(str(index + 1) for index in mismatches)
+                print(f"错误: 未修改页面内嵌图哈希变化: 第 {pages} 页", file=sys.stderr)
+                return 1
+            print(f"unmodified_page_hashes=ok ({max(0, utils.pdf_page_info(candidate)[0] - 1)} pages)")
+
+            # 门禁 3：同一渲染器 300dpi 回渲，声明区域外变化必须为 0。
+            if not args.skip_render_audit:
+                audit = utils.audit_pdf_render_outside_boxes(
+                    Path(args.original_pdf),
+                    candidate,
+                    page_index=args.page_index,
+                    allowed_boxes=allowed_boxes,
+                    boxes_size=meta.displayed_size,
+                    dpi=args.audit_dpi,
+                    padding=args.audit_padding,
+                )
+                print(
+                    f"render_audit_{args.audit_dpi}dpi: changed={audit.changed_pixels}, "
+                    f"bbox={audit.changed_bbox}, outside_allowed={audit.outside_allowed}"
+                )
+                if audit.outside_allowed:
+                    print(
+                        f"错误: {args.audit_dpi}dpi 回渲在允许区外出现 "
+                        f"{audit.outside_allowed} 个变化像素，拒绝交付。",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+            candidate.replace(args.output)
+        finally:
+            candidate.unlink(missing_ok=True)
     else:
         if args.page_size:
             # BUG-024：数值个数不对或非数字时，原先裸抛 IndexError/ValueError。
@@ -432,7 +569,7 @@ def cmd_package(args: argparse.Namespace) -> int:
 
 
 def cmd_export_page(args: argparse.Namespace) -> int:
-    """导出 PDF 页内嵌整页扫描图（原生像素，可选转到显示朝向）。"""
+    """安全提取 PDF 页内嵌整页扫描图，并可做往返封装验证。"""
     try:
         meta = utils.extract_embedded_page_image(
             Path(args.pdf),
@@ -451,6 +588,57 @@ def cmd_export_page(args: argparse.Namespace) -> int:
         f"embedded={meta.embedded_size[0]}×{meta.embedded_size[1]}, "
         f"displayed={meta.displayed_size[0]}×{meta.displayed_size[1]})"
     )
+    # PNG 自身回读必须逐像素一致，防止输出链发生颜色空间或调色板转换。
+    saved = np.asarray(Image.open(args.output).convert("RGB"))
+    expected = np.asarray(meta.image.convert("RGB"))
+    if not np.array_equal(saved, expected):
+        print("错误: 提取图保存后像素发生变化。", file=sys.stderr)
+        args.output.unlink(missing_ok=True)
+        return 1
+
+    if not args.no_roundtrip_check:
+        handle = tempfile.NamedTemporaryFile(suffix=".pdf", prefix="scan-extract-check-", delete=False)
+        handle.close()
+        candidate = Path(handle.name)
+        candidate.unlink(missing_ok=True)
+        try:
+            embedded = utils.prepare_image_for_pdf_replace(
+                meta.image,
+                embedded_size=meta.embedded_size,
+                displayed_size=meta.displayed_size,
+                rotate=meta.rotate,
+                source_orient="displayed" if args.as_displayed else "embedded",
+            )
+            utils.replace_pdf_image(Path(args.pdf), candidate, embedded, page_index=args.page_index)
+            back = utils.extract_embedded_page_image(candidate, page_index=args.page_index)
+            embedded_equal = np.array_equal(
+                np.asarray(back.image.convert("RGB")), np.asarray(embedded.convert("RGB"))
+            )
+            before = np.asarray(utils.render_pdf_page_mupdf(
+                Path(args.pdf), page_index=args.page_index, dpi=args.audit_dpi
+            ))
+            after = np.asarray(utils.render_pdf_page_mupdf(
+                candidate, page_index=args.page_index, dpi=args.audit_dpi
+            ))
+            render_equal = before.shape == after.shape and np.array_equal(before, after)
+            unchanged = utils.compare_unmodified_page_hashes(
+                Path(args.pdf), candidate, modified_pages={args.page_index}
+            )
+            print("roundtrip_check=" + json.dumps({
+                "embedded_diff_pixels": int(np.count_nonzero(np.any(
+                    np.asarray(back.image.convert("RGB")) != np.asarray(embedded.convert("RGB")), axis=2
+                ))) if embedded_equal is False else 0,
+                "render_dpi": args.audit_dpi,
+                "render_backend": "pymupdf",
+                "render_equal": render_equal,
+                "unmodified_page_hashes_equal": not unchanged,
+            }, ensure_ascii=False))
+            if not embedded_equal or not render_equal or unchanged:
+                print("错误: 提取图往返封装验证失败，拒绝将其作为编辑基图。", file=sys.stderr)
+                args.output.unlink(missing_ok=True)
+                return 1
+        finally:
+            candidate.unlink(missing_ok=True)
     return 0
 
 
@@ -459,7 +647,7 @@ def cmd_export_page(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="扫描版 PDF / 图片局部编辑：删除、移动、替换、验证。",
+        description="扫描版 PDF / 图片局部编辑：删除、移动、替换、复合、验证、封装 PDF、安全提取（export-page 为兼容旧名）。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -490,7 +678,14 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--source-y", required=True, help="纵向范围 y1,y2（须 y1<y2）")
     pm.add_argument("--shift-y", type=int, required=True, help="上移像素数（正值=上移）")
     pm.add_argument("--cleanup-ink-threshold", type=int, default=246, help="残留清理墨迹阈值（默认 246）")
-    pm.add_argument("--cleanup-boxes", nargs="+", help="手动指定清理区域（不给则自动用源区域尾部）")
+    pm.add_argument(
+        "--cleanup-mode", choices=["auto", "add", "replace"], default="auto",
+        help="清理框语义：auto=仅自动尾部框（默认）；add=自动框+手动框；replace=仅手动框",
+    )
+    pm.add_argument(
+        "--cleanup-boxes", nargs="+",
+        help="手动清理区域；须配合 --cleanup-mode add 或 replace",
+    )
     pm.add_argument("--output", type=Path, required=True, help="输出路径")
     pm.add_argument("--crop-box", type=parse_box, help="预览裁剪框")
     pm.add_argument("--save-mask", type=Path, help="保存清理蒙版")
@@ -513,6 +708,14 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--output", type=Path, required=True, help="输出路径")
     pe.add_argument("--crop-box", type=parse_box, help="预览裁剪框")
     pe.add_argument("--save-mask", type=Path, help="保存清理蒙版")
+    pe.add_argument("--analysis-threshold", type=int, default=220,
+                    help="碰撞/字距/基线分析的墨迹阈值（默认 220）")
+    pe.add_argument("--fail-on-collision", action="store_true",
+                    help="供体与清理后保留墨迹相交时失败")
+    pe.add_argument("--min-gap", type=float,
+                    help="最近墨迹距离下限（像素；不足则失败）")
+    pe.add_argument("--max-baseline-deviation", type=int,
+                    help="相对参考字的最大基线偏差绝对值（像素）")
     pe.set_defaults(func=cmd_replace)
 
     # compound
@@ -535,7 +738,15 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--result", type=Path, required=True, help="编辑后图路径")
     pv.add_argument("--allowed-boxes", nargs="+", help="允许变化的区域（可多个）")
     pv.add_argument("--blank-box", help="空白检查区域 x1,y1,x2,y2")
-    pv.add_argument("--blank-threshold", type=int, default=180, help="空白区深色像素阈值（默认 180）")
+    pv.add_argument(
+        "--blank-thresholds", type=parse_thresholds, default=(180, 220, 240),
+        help="空白区残影检查阈值，逗号分隔（默认 180,220,240）",
+    )
+    pv.add_argument(
+        "--blank-threshold", dest="blank_thresholds",
+        type=lambda value: parse_thresholds(value), default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
     pv.add_argument("--blank-limit", type=int, help="空白区深色像素上限（默认 0）")
     pv.add_argument("--preserve-box", help="应保留不变的区域 x1,y1,x2,y2")
     pv.set_defaults(func=cmd_verify)
@@ -552,28 +763,42 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--page-index", type=int, default=0, help="替换内嵌图的页码（默认 0）")
     pp.add_argument(
         "--source-orient", choices=["auto", "embedded", "displayed"], default="auto",
-        help="输入图朝向：auto=按尺寸推断（默认）；displayed=export-page --as-displayed "
+        help="输入图朝向：auto=按尺寸推断（默认）；displayed=extract --as-displayed "
              "导出的显示朝向图（编辑后回封，/Rotate≠0 时旋回）；embedded=内嵌朝向图。"
              "/Rotate=180 或正方形图尺寸无法区分朝向，必须显式指定（BUG-066）。",
     )
     pp.add_argument("--title", help="PDF 标题元数据")
     pp.add_argument("--subject", help="PDF 主题元数据")
+    pp.add_argument(
+        "--audit-allowed-boxes", nargs="+",
+        help="允许修改区（显示朝向提取图坐标，可多个）；保留原 PDF 封装时默认必填",
+    )
+    pp.add_argument("--audit-dpi", type=int, default=300,
+                    help="封装回渲审计 dpi（默认 300）")
+    pp.add_argument("--audit-padding", type=int, default=2,
+                    help="允许框映射到回渲图后的边界扩展像素（默认 2）")
+    pp.add_argument("--skip-render-audit", action="store_true",
+                    help="显式跳过区外回渲门禁；内嵌图往返与未修改页哈希仍强制检查")
     pp.set_defaults(func=cmd_package)
 
-    # export-page：导出内嵌整页图（避免回渲重采样）
-    px = sub.add_parser(
-        "export-page",
-        help="导出 PDF 页内嵌整页扫描图（原生像素；可选 --as-displayed 按 /Rotate 转显示朝向）",
-    )
-    px.add_argument("--pdf", type=Path, required=True, help="源 PDF 路径")
-    px.add_argument("--output", type=Path, required=True, help="输出 PNG 路径")
-    px.add_argument("--page-index", type=int, default=0, help="页码（默认 0）")
-    px.add_argument(
-        "--as-displayed",
-        action="store_true",
-        help="按 /Rotate 转到阅读器显示朝向（编辑后 package 会自动旋回）",
-    )
-    px.set_defaults(func=cmd_export_page)
+    # extract：安全提取；export-page 保留为兼容别名。
+    for command, help_text in (
+        ("extract", "安全提取 PDF 页内嵌整页图，并默认验证往返封装像素"),
+        ("export-page", "兼容旧名：等同 extract"),
+    ):
+        px = sub.add_parser(command, help=help_text)
+        px.add_argument("--pdf", type=Path, required=True, help="源 PDF 路径")
+        px.add_argument("--output", type=Path, required=True, help="输出 PNG 路径")
+        px.add_argument("--page-index", type=int, default=0, help="页码（默认 0）")
+        px.add_argument(
+            "--as-displayed", action="store_true",
+            help="按 /Rotate 转到阅读器显示朝向",
+        )
+        px.add_argument("--audit-dpi", type=int, default=300,
+                        help="往返封装回渲检查 dpi（默认 300）")
+        px.add_argument("--no-roundtrip-check", action="store_true",
+                        help="跳过提取后的往返封装验证（不推荐）")
+        px.set_defaults(func=cmd_export_page)
 
     return p
 

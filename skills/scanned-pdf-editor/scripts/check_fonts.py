@@ -59,7 +59,9 @@ def install_targets() -> list[Path]:
             Path("/Library/Fonts"),                    # 系统级（需 sudo）
         ]
     elif system == "Windows":
-        return [Path("C:/Windows/Fonts")]
+        # Windows 10+ 支持无需管理员权限的用户级字体目录，优先于系统目录。
+        local_app_data = Path.home() / "AppData" / "Local"
+        return [local_app_data / "Microsoft" / "Windows" / "Fonts", Path("C:/Windows/Fonts")]
     else:  # Linux
         return [
             Path.home() / ".local" / "share" / "fonts",
@@ -293,9 +295,19 @@ def main() -> None:
 
     print_status(installed, missing)
 
-    if args.source_dir and missing:
+    if args.source_dir:
+        # 路径合法性不能因目标字体恰好已安装而被静默跳过。
+        if not args.source_dir.exists():
+            print(f"错误: 目录不存在: {args.source_dir}", file=sys.stderr)
+            sys.exit(1)
+        if not args.source_dir.is_dir():
+            print(f"错误: 不是目录: {args.source_dir}", file=sys.stderr)
+            sys.exit(1)
         print()
-        scan_and_copy(args.source_dir, missing, args.yes)
+        if missing:
+            scan_and_copy(args.source_dir, missing, args.yes)
+        else:
+            print("当前筛选范围没有缺失字体，无需从来源目录查找或复制。")
     elif missing:
         print_install_guide(missing)
 

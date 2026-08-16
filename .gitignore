@@ -227,3 +227,11 @@ tests/results/
 
 # Expected result reference images (large binary, not source code)
 tests/期望效果/
+
+# Skill-local runtime test artifacts (root tests/results/ rule is anchored;
+# sync_install.sh also excludes this whole dir when mirroring)
+skills/scanned-pdf-editor/tests/
+
+# Skill-local Python tooling caches
+skills/scanned-pdf-editor/.ruff_cache/
+skills/scanned-pdf-editor/.pytest_cache/

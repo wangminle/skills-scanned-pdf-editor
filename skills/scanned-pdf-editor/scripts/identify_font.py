@@ -210,13 +210,41 @@ def parse_ref(s, image_size=None):
     return name.strip(), (x1, y1, x2, y2)
 
 
+def parse_candidates_spec(spec: str) -> dict[str, tuple[str, int]]:
+    """解析 --candidates 覆盖串。
+
+    每项格式 ``名称=文件名`` 或 ``名称=文件名[索引]``（20260816 复测发现旧实现
+    硬编码索引 0，ttc 多字重家族如 Hiragino W3/W6 会坍缩到同一字重、同分并列）。
+    尾逗号产生空项时静默过滤（BUG-046）；缺 '=' 时退出码 2。
+    """
+    import re
+
+    cands: dict[str, tuple[str, int]] = {}
+    for item in spec.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if '=' not in item:
+            print(f'错误: --candidates 每项格式应为 名称=文件名 或 名称=文件名[索引]，收到: {item!r}',
+                  file=sys.stderr)
+            sys.exit(2)
+        name, fn = item.split('=', 1)
+        fn = fn.strip()
+        idx = 0
+        m = re.match(r'^(.+)\[(\d+)\]$', fn)
+        if m:
+            fn, idx = m.group(1), int(m.group(2))
+        cands[name.strip()] = (fn, idx)
+    return cands
+
+
 def main():
     ap = argparse.ArgumentParser(description='识别扫描件原文字体（灰度 NCC + 高度归一化 + 多字聚合）')
     ap.add_argument('--source', required=True, help='源扫描图 (PNG)')
     ap.add_argument('--ref', action='append', required=True, metavar='CHAR=X1,Y1,X2,Y2',
                     help='参考字及其框，可多次给出（推荐 2~4 个不同结构的字）')
     ap.add_argument('--candidates', default='',
-                    help='逗号分隔覆盖默认候选。格式: 仿宋=simfang.ttf,宋体=simsun.ttc')
+                    help='逗号分隔覆盖默认候选。格式: 仿宋=simfang.ttf,Songti SC Light=Songti.ttc[3]（[n] 可选，指定 ttc 字重索引）')
     ap.add_argument(
         '--allow-degraded',
         action='store_true',
@@ -250,17 +278,7 @@ def main():
 
     if args.candidates:
         # BUG-046：尾逗号（如 "仿宋=x.ttf,"）产生空项，split('=') 值不够解包 → 裸 traceback。
-        # 过滤空项并校验每项含 '='。
-        cands = {}
-        for item in args.candidates.split(','):
-            item = item.strip()
-            if not item:
-                continue
-            if '=' not in item:
-                print(f'错误: --candidates 每项格式应为 名称=文件名，收到: {item!r}', file=sys.stderr)
-                sys.exit(2)
-            name, fn = item.split('=', 1)
-            cands[name.strip()] = (fn.strip(), 0)
+        cands = parse_candidates_spec(args.candidates)
     else:
         cands = CJK_CANDIDATES
 

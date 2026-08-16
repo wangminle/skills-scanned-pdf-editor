@@ -559,6 +559,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # BUG-069：--output 带路径成分时会被拼成 output_dir/<原路径> 静默嵌套落盘
+    # （crop 还会与主图分开两处）。契约是「output-dir 内的文件名」，带路径直接拒绝。
+    if args.output:
+        out_path = Path(args.output)
+        if out_path.is_absolute() or len(out_path.parts) > 1 or ".." in out_path.parts:
+            parser.error(
+                f"--output 只接受 --output-dir 内的文件名（如 result.png），收到: {args.output!r}。"
+                "要指定目录请用 --output-dir；不要在 --output 里带路径。"
+            )
+
     # 输出目录默认跟随源文件（不污染 CWD / repo 根目录）
     if args.output_dir is None:
         args.output_dir = Path(args.source).resolve().parent / "scan_text_fusion_out"
