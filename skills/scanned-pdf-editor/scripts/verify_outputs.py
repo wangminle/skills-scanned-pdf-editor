@@ -263,12 +263,22 @@ def verify(case: VerifyCase, *, strict_hash: bool, reproduce: bool = False) -> l
     # 应保留区域
     if case.preserve_box:
         x1, y1, x2, y2 = case.preserve_box
-        preserved = int(np.count_nonzero(
-            np.any(source[y1:y2, x1:x2] != final[y1:y2, x1:x2], axis=2)
-        ))
-        if preserved:
-            errors.append(f"应保留区域出现 {preserved} 个变化像素")
-        print(f"  应保留区域变化像素：{preserved}")
+        h, w = final.shape[:2]
+        # BUG-073：越界框被 numpy 静默截断、负坐标被当负索引绕到页尾，都会让
+        # preserved=0 从而"通过"，把写错坐标的复核配置变成假绿。先校验再比较，
+        # 非法配置计入 errors 使 rc≠0。
+        if x1 < 0 or y1 < 0 or x2 > w or y2 > h or x1 >= x2 or y1 >= y2:
+            errors.append(
+                f"preserve_box 坐标 ({x1}, {y1}, {x2}, {y2}) 非法/越界（页面 {w}×{h}）"
+            )
+            print(f"  preserve_box 坐标非法/越界：({x1}, {y1}, {x2}, {y2})（页面 {w}×{h}）")
+        else:
+            preserved = int(np.count_nonzero(
+                np.any(source[y1:y2, x1:x2] != final[y1:y2, x1:x2], axis=2)
+            ))
+            if preserved:
+                errors.append(f"应保留区域出现 {preserved} 个变化像素")
+            print(f"  应保留区域变化像素：{preserved}")
 
     # 应删区域
     if case.dark_box:

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import Iterable
 
 import cv2
@@ -215,6 +216,146 @@ def replace_pdf_image(
     temporary.replace(output_path)
 
 
+def _decode_xref_pixels(page, xref: int) -> np.ndarray | None:
+    """把页面所属文档中 *xref* 的图像解码为 RGB 数组；失败返回 None（调用方按
+    「无法证明等价」处理，保持报错路径）。"""
+    import fitz
+
+    try:
+        doc = page.parent
+        # RGB 相同不代表带软蒙版/颜色键蒙版的图像视觉等价；并列时保守拒绝。
+        for key in ("SMask", "Mask", "ImageMask", "SMaskInData"):
+            kind, value = doc.xref_get_key(xref, key)
+            if kind != "null" and value not in {"/None", "false", "0"}:
+                return None
+        pm = fitz.Pixmap(doc, xref)
+        if pm.alpha:
+            return None
+        if pm.n != 3:
+            pm = fitz.Pixmap(fitz.csRGB, pm)
+        return np.frombuffer(pm.samples, dtype=np.uint8).reshape(pm.h, pm.w, 3).copy()
+    except Exception:
+        return None
+
+
+def _tied_xrefs_pixel_identical(page, xrefs: list[int]) -> bool:
+    """并列候选是否解码出完全相同的像素。
+
+    BUG-079：PyMuPDF 的 ``page.replace_image`` 会把旧 xref 的流原地换新，同时在
+    Resources 里留下一个内容相同的新副本（fzImg0）——
+    封装门禁在候选 PDF 上重新选图时，这类「平局但像素等价」的残留会触发 strict
+    的两个过近误报，使 package/extract 对此类 PDF 完全不可用（20260816 测试批次
+    跑在门禁提交之前，从未覆盖该形状）。这里只证明无蒙版图的像素一致，
+    调用方还必须确认实际绘制对象；不能用像素相同证明可以任选对象。
+    """
+    first = None
+    for xref in xrefs:
+        arr = _decode_xref_pixels(page, xref)
+        if arr is None:
+            return False
+        if first is None:
+            first = arr
+        elif arr.shape != first.shape or not np.array_equal(arr, first):
+            return False
+    return True
+
+
+def _content_image_names(contents: bytes) -> list[str] | None:
+    """读取直接内容流中的 /Name Do，跳过注释、字符串和复合对象。
+
+    内联图的二进制边界及损坏语法不在本路径解析范围，返回 None 保持拒绝。
+    """
+    names = []
+    previous_name = None
+    delimiters = b"\x00\t\n\x0c\r ()<>[]{}/%"
+    i, size, compound_depth = 0, len(contents), 0
+    while i < size:
+        char = contents[i]
+        if char in b"\x00\t\n\x0c\r ":
+            i += 1
+            continue
+        if char == ord("%"):
+            while i < size and contents[i] not in b"\r\n":
+                i += 1
+            continue
+        if char == ord("("):
+            previous_name = None
+            i += 1
+            depth = 1
+            while i < size and depth:
+                char = contents[i]
+                if char == ord("\\"):
+                    i += 2
+                    continue
+                depth += (char == ord("(")) - (char == ord(")"))
+                i += 1
+            if depth:
+                return None
+            continue
+        if contents[i:i + 2] in (b"<<", b">>"):
+            compound_depth += 1 if contents[i:i + 2] == b"<<" else -1
+            previous_name = None
+            i += 2
+            if compound_depth < 0:
+                return None
+            continue
+        if char == ord("<"):
+            end = contents.find(b">", i + 1)
+            if end < 0:
+                return None
+            previous_name = None
+            i = end + 1
+            continue
+        if char in b"[]":
+            compound_depth += 1 if char == ord("[") else -1
+            previous_name = None
+            i += 1
+            if compound_depth < 0:
+                return None
+            continue
+        if char == ord("/"):
+            i += 1
+            start = i
+            while i < size and contents[i] not in delimiters:
+                i += 1
+            name = re.sub(rb"#([0-9A-Fa-f]{2})",
+                          lambda match: bytes([int(match[1], 16)]), contents[start:i])
+            previous_name = name.decode("latin1")
+            continue
+        start = i
+        while i < size and contents[i] not in delimiters:
+            i += 1
+        if i == start:
+            return None
+        token = contents[start:i]
+        if token == b"BI":
+            return None
+        if token == b"Do" and previous_name is not None and not compound_depth:
+            names.append(previous_name)
+        previous_name = None
+    return names if compound_depth == 0 else None
+
+
+def _single_drawn_tied_xref(page, xrefs: list[int]) -> int | None:
+    """仅为无蒙版等价残留选择唯一实际绘制对象，复杂 Form/双绘制保持拒绝。"""
+    if not _tied_xrefs_pixel_identical(page, xrefs):
+        return None
+    try:
+        entries = [entry for entry in page.get_images(full=True) if entry[0] in xrefs]
+        # Form 的局部资源作用域不能当成页面资源名来解析。
+        if any(entry[9] != 0 for entry in entries):
+            return None
+        resources = {entry[7]: entry[0] for entry in entries}
+        names = _content_image_names(page.read_contents())
+        if names is None:
+            return None
+        drawn = [resources[name] for name in names if name in resources]
+        return drawn[0] if len(drawn) == 1 else None
+    except Exception:
+        # 无法证明绘制关系时维持 strict 门禁，不能退回“任选”。
+        return None
+
+
 def _select_page_image_xref(page, images: list, *, strict: bool = True) -> int:
     """从页面内嵌图列表中选出整页扫描图对应的 xref。
 
@@ -263,12 +404,17 @@ def _select_page_image_xref(page, images: list, *, strict: bool = True) -> int:
     if strict:
         # 头部两个候选覆盖比例都很高且接近时，无法可靠区分整页图与背景图，
         # 静默替换会冒替换错对象的风险——报错让调用方用新建 PDF 模式或人工处理。
+        # BUG-079/081：仅允许无蒙版、像素等价且只有一个实际绘制对象的资源残留。
         if best_ratio > 0.5 and best_ratio - second_ratio < 0.1:
-            raise RuntimeError(
-                f"页面含 {len(images)} 张图，覆盖比例最高的两个过近（"
-                f"{best_ratio:.2f} vs {second_ratio:.2f}），无法可靠选出整页扫描图。"
-                "请改用 package 新建 PDF 模式，或先确认页面结构。"
-            )
+            tied = [x for x, r in scored if r > 0.5 and best_ratio - r < 0.1]
+            drawn_xref = _single_drawn_tied_xref(page, tied) if len(tied) > 1 else None
+            if drawn_xref is None:
+                raise RuntimeError(
+                    f"页面含 {len(images)} 张图，覆盖比例最高的两个过近（"
+                    f"{best_ratio:.2f} vs {second_ratio:.2f}），无法可靠选出整页扫描图。"
+                    "请改用 package 新建 PDF 模式，或先确认页面结构。"
+                )
+            return drawn_xref
     return best_xref
 
 
@@ -611,6 +757,25 @@ def background_median(rgb: np.ndarray, threshold: float = 235) -> np.ndarray:
 # ───────────────────────────── 删除：墨迹蒙版 + Telea 修补 ─────────────────────────────
 
 
+def validate_boxes_in_bounds(
+    image: np.ndarray, boxes: Iterable[Box], *, label: str = "boxes"
+) -> None:
+    """校验所有矩形坐标都在图像内且非空（BUG-070）。
+
+    与 ``ink_bbox`` / ``analyze_replace_placement`` 的守卫同形：越界框会被 numpy
+    静默截断（完全越界则空切片），负坐标会被当负索引绕到页尾，二者都让删除/清理
+    落到错误区域却 rc=0。删除类入口统一调用，避免"看着成功、其实没删/删错"。
+    """
+    h, w = image.shape[:2]
+    for x1, y1, x2, y2 in boxes:
+        if x1 < 0 or y1 < 0 or x2 > w or y2 > h or x1 >= x2 or y1 >= y2:
+            raise ValueError(
+                f"{label} 坐标 ({x1}, {y1}, {x2}, {y2}) 越界或为空"
+                f"（页面 {w}×{h}，x 需在 [0, {w}]、y 需在 [0, {h}] 内且 x1<x2、y1<y2）。"
+                "请核对坐标。"
+            )
+
+
 def ink_mask_in_boxes(
     image: np.ndarray,
     boxes: Iterable[Box],
@@ -629,6 +794,13 @@ def ink_mask_in_boxes(
     """
     region = np.zeros(image.shape[:2], dtype=np.uint8)
     for x1, y1, x2, y2 in boxes:
+        # BUG-071：倒置/零宽高框（如负 shift 下算反的自动清理框）切片为空，
+        # 蒙版全 0 静默无效。与 parse_box 一致直接报错，不空转。
+        if x1 >= x2 or y1 >= y2:
+            raise ValueError(
+                f"清理框 ({x1}, {y1}, {x2}, {y2}) 为空或倒置（需 x1<x2 且 y1<y2）。"
+                "请检查起止坐标是否写反。"
+            )
         region[y1:y2, x1:x2] = 255
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     mask = np.where((gray < threshold) & (region > 0), 255, 0).astype(np.uint8)
@@ -683,6 +855,12 @@ def remove_regions_telea(
 
     返回 (修补后图像, 蒙版)。
     """
+    # BUG-070：越界/倒置框会被 numpy 静默截断或负索引绕行，让删除落到错误区域
+    # 且 rc=0。与 move 的 BUG-020/037/038 守卫对齐，在共享入口统一拦截。
+    # BUG-077：boxes 契约是 Iterable，校验会先遍历一次；生成器/迭代器会被耗尽，
+    # 后续蒙版构建拿不到坐标，静默返回零蒙版。先物化为列表再复用。
+    boxes = list(boxes)
+    validate_boxes_in_bounds(image, boxes, label="boxes")
     if mask_mode == "full":
         mask = full_mask_in_boxes(image, boxes)
     else:
@@ -836,7 +1014,20 @@ def move_block(
     if cleanup_mode not in {"auto", "add", "replace"}:
         raise ValueError(f"未知 cleanup_mode: {cleanup_mode!r}")
     manual = list(cleanup_boxes or [])
-    automatic = [(x1, y2 - shift_y, x2, y2)]
+    # BUG-071：自动清理框应取「原块中未被新块覆盖的残留区域」。旧公式只在
+    # shift_y>=0（上移）时成立；shift_y<0（下移）时新块占 [y1+|s|, y2+|s|)，
+    # 残留是原块上半 [y1, y1-shift_y)，旧公式给出 y0>y1 的倒置空框，
+    # 导致原位不清理、内容被复制（蒙版全 0 且 rc=0）。按方向分支。
+    # BUG-075：零位移没有残留区域，自动清理列表为空——auto 返回原图与零蒙版，
+    # add 仍执行手动框（零高框会触发 ink_mask_in_boxes 的空框守卫）。
+    # BUG-076：残留区必须落在原块内。|shift_y| >= 块高时整块都是残留，
+    # 未钳制的公式会把清理框越出原块，擦掉原块与目标块之间的保留内容。
+    if shift_y > 0:
+        automatic = [(x1, max(y1, y2 - shift_y), x2, y2)]
+    elif shift_y < 0:
+        automatic = [(x1, y1, x2, min(y2, y1 - shift_y))]
+    else:
+        automatic = []
     if cleanup_mode == "auto":
         if manual:
             raise ValueError(

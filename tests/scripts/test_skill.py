@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import json
 import shutil
+import subprocess  # BUG-078：模块级注解 "subprocess.CompletedProcess" 需在模块作用域可见
 import sys
 import tempfile
 from pathlib import Path
@@ -2905,6 +2906,33 @@ class TestBugFix065_E2eOptionalGate(unittest.TestCase):
                         "E2E 的 if 守卫必须在 pytest 调用之前（BUG-065）")
 
 
+class TestBug080ExplicitBatchGate(unittest.TestCase):
+    def test_missing_assets_fail_only_when_batch_is_required(self):
+        """执行真实门禁 E2E 段：显式批次缺资产必须失败，普通干净克隆可跳过。"""
+        import os
+        content = (SCRIPTS_DIR / "run_checks.sh").read_text(encoding="utf-8")
+        stage = content[content.index('echo "== pytest e2e basic-tasks =="'):]
+        for assets in ((), ("test",), ("test", "tasks")):
+            with self.subTest(assets=assets), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                if "test" in assets:
+                    test_file = root / "tests/scripts/test_e2e_basic_tasks.py"
+                    test_file.parent.mkdir(parents=True)
+                    test_file.touch()
+                if "tasks" in assets:
+                    (root / "tests/测试任务").mkdir()
+                env = dict(os.environ, PROJECT_ROOT=str(root), PY=sys.executable)
+                env.pop("SCANNED_PDF_RESULTS_BATCH", None)
+                optional = subprocess.run(["bash", "-c", "set -eu\n" + stage],
+                                          env=env, text=True, capture_output=True)
+                self.assertEqual(optional.returncode, 0, optional.stderr)
+                env["SCANNED_PDF_RESULTS_BATCH"] = "20261007"
+                required = subprocess.run(["bash", "-c", "set -eu\n" + stage],
+                                          env=env, text=True, capture_output=True)
+                self.assertNotEqual(required.returncode, 0,
+                                    "显式批次缺少测试文件或资产时不能跳过并报全绿")
+
+
 class TestBugFix066_SourceOrient(unittest.TestCase):
     """BUG-066：prepare_image_for_pdf_replace 仅凭尺寸判朝向。
 
@@ -3308,6 +3336,508 @@ class TestPixelAuditIteration20260816(unittest.TestCase):
         self.assertEqual(case.blank_thresholds, (180, 220, 240))
         self.assertEqual(dict(case.blank_dark_limits), {180: 0, 220: 0, 240: 0})
         self.assertEqual(case.render_backend, "pymupdf")
+
+
+class TestBugFix070_074(unittest.TestCase):
+    """BUG-070 至 BUG-074 回归测试（第八轮 issue 清单，Windows 11 issue 复现适配）。
+
+    - BUG-070：remove --boxes 越界框被 numpy 静默截断/无效且 rc=0
+              → validate_boxes_in_bounds 下沉共享入口，CLI 统一 exit 2
+    - BUG-071：move 负 --shift-y 自动清理框倒置（原位不清理、内容被复制）
+              → 按 shift 方向取残留区域 + ink_mask_in_boxes 倒置框显式报错
+    - BUG-072：--fusion-variants 只做 float() 不校验有限正数
+              → nan 产近黑图 rc=0、负数裸 traceback；修复后进渲染前拦截
+    - BUG-073：verify_outputs 的 preserve_box 越界/负值静默通过复核（假绿）
+              → 非法配置计入 errors 使 rc≠0
+    - BUG-074：test_e2e_basic_tasks 对夹具缺失的假设自相矛盾 → 统一 skipTest
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        # 300×300 浅灰底 + 一条深色横带（y=100..130, x=50..250）
+        self.img = np.full((300, 300, 3), 240, dtype=np.uint8)
+        self.img[100:130, 50:250] = 60
+
+    def _save_source(self, name="s.png"):
+        path = Path(self.tmpdir) / name
+        Image.fromarray(self.img).save(path)
+        return path
+
+    # ── BUG-070：remove --boxes 边界校验 ──
+
+    def test_validate_boxes_in_bounds_rejects_oob(self):
+        """x2 越出图宽应报错，而非被 numpy 静默截断（旧行为 changed_pixels>0 且 rc=0）。"""
+        with self.assertRaisesRegex(ValueError, "越界"):
+            utils.validate_boxes_in_bounds(self.img, [(50, 50, 350, 130)], label="--boxes")
+
+    def test_validate_boxes_in_bounds_rejects_negative(self):
+        """负坐标应报错，而非被 numpy 负索引绕到页尾。"""
+        with self.assertRaisesRegex(ValueError, "越界"):
+            utils.validate_boxes_in_bounds(self.img, [(-10, 50, 50, 130)])
+
+    def test_validate_boxes_in_bounds_accepts_valid(self):
+        """合法框不受影响（含贴边框：x2==w 是合法的半开区间上界）。"""
+        utils.validate_boxes_in_bounds(self.img, [(50, 50, 250, 130), (0, 0, 300, 300)])
+
+    def test_remove_regions_telea_rejects_oob_box(self):
+        """共享删除入口 remove_regions_telea 必须拦截越界框（telea CLI 依赖它）。"""
+        with self.assertRaisesRegex(ValueError, "越界"):
+            utils.remove_regions_telea(self.img, [(50, 50, 350, 130)])
+
+    def test_remove_cli_oob_box_exits_2(self):
+        """remove --boxes 越界 → 错误: 提示 + rc=2，不再静默截断继续。"""
+        import contextlib
+        import io
+        import scan_edit_ops as ops
+        src = self._save_source()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ret = ops.main([
+                "remove", "--source", str(src),
+                "--boxes", "50,50,350,130",
+                "--output", str(Path(self.tmpdir) / "o.png"),
+            ])
+        self.assertEqual(ret, 2)
+        self.assertIn("错误: --boxes", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_remove_cli_in_bounds_still_works(self):
+        """正向路径回归：正常界内 --boxes 删除仍 rc=0 并产出结果。"""
+        import scan_edit_ops as ops
+        src = self._save_source()
+        out = Path(self.tmpdir) / "o.png"
+        ret = ops.main([
+            "remove", "--source", str(src),
+            "--boxes", "50,100,250,130", "--output", str(out),
+        ])
+        self.assertEqual(ret, 0)
+        self.assertTrue(out.exists())
+
+    # ── BUG-071：move 负 --shift-y 自动清理框 ──
+
+    def test_move_block_negative_shift_cleans_residue(self):
+        """负 shift（下移）：残留区域 [y1, y1-|s|) 应被清理，而非旧公式的倒置空框。
+
+        旧实现蒙版全 0（原位不清理）、内容被复制；修复后蒙版应恰好覆盖残留带。
+        """
+        result, mask = utils.move_block(
+            self.img, content_x=(50, 250), source_y=(100, 130), shift_y=-20
+        )
+        self.assertGreater(int((mask > 0).sum()), 0, "负 shift 也必须产生非空清理蒙版")
+        mask_rows = set(np.where(np.any(mask > 0, axis=1))[0].tolist())
+        self.assertLessEqual(max(mask_rows), 120, "蒙版不应越过残留区下缘 y[100,120)")
+        self.assertGreaterEqual(min(mask_rows), 100, "蒙版应从残留区上缘 y=100 开始")
+        # 残留区上半（远离新块，避开 Telea 边界泄漏）：深色像素应大幅减少
+        src_dark = int(((self.img[100:112, 50:250].mean(axis=2)) < 120).sum())
+        out_dark = int((result[100:112, 50:250].mean(axis=2) < 120).sum())
+        self.assertLess(out_dark, src_dark // 2, "残留区应被清理而非原样复制")
+        # 新块确实落到 y[120,150)
+        self.assertLess(result[120:145, 50:250].mean(), 120)
+
+    def test_ink_mask_in_boxes_rejects_inverted_box(self):
+        """倒置/零宽高清理框应显式报错，不再静默空切片、蒙版全 0。"""
+        with self.assertRaisesRegex(ValueError, "倒置|为空"):
+            utils.ink_mask_in_boxes(self.img, [(50, 130, 250, 100)], threshold=180, dilation=5)
+
+    def test_move_cli_negative_shift_rc0_with_mask(self):
+        """CLI 层面：--shift-y -20 应 rc=0 且 --save-mask 非全 0（BUG-071 症状）。"""
+        import scan_edit_ops as ops
+        src = self._save_source("b.png")
+        out = Path(self.tmpdir) / "o.png"
+        mask = Path(self.tmpdir) / "m.png"
+        ret = ops.main([
+            "move", "--source", str(src),
+            "--content-x", "50,250", "--source-y", "100,130", "--shift-y", "-20",
+            "--output", str(out), "--save-mask", str(mask),
+        ])
+        self.assertEqual(ret, 0)
+        self.assertGreater(int((np.asarray(Image.open(mask)) > 0).sum()), 0,
+                           "CLI 负 shift 也应产生非空清理蒙版")
+
+    def test_move_cli_positive_shift_still_works(self):
+        """正向路径回归：--shift-y 20（正方向）rc=0。"""
+        import scan_edit_ops as ops
+        src = self._save_source("bp.png")
+        out = Path(self.tmpdir) / "op.png"
+        ret = ops.main([
+            "move", "--source", str(src),
+            "--content-x", "50,250", "--source-y", "100,130", "--shift-y", "20",
+            "--output", str(out),
+        ])
+        self.assertEqual(ret, 0)
+        self.assertTrue(out.exists())
+
+    # ── BUG-072：--fusion-variants 有限正数校验 ──
+
+    def _fusion_variants_subprocess(self, variants: str) -> "subprocess.CompletedProcess":
+        import subprocess
+        import sys
+        if font_registry.default_cjk_font() is None:
+            self.skipTest("本机无 CJK 字体，跳过融合测试")
+        src = self._save_source()
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "scan_text_fusion.py"),
+             "--source", str(src), "--text", "测", "--position", "10", "10",
+             "--variants", "--fusion-variants", variants,
+             "--output-dir", str(Path(self.tmpdir) / "out")],
+            capture_output=True, text=True,
+        )
+
+    def test_fusion_variants_nan_rejected(self):
+        """nan 应被拦截：旧行为 rc=0 + 近黑对比图（仅 RuntimeWarning）。"""
+        completed = self._fusion_variants_subprocess("0.3,nan")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("错误: --fusion-variants 需为有限正数", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_fusion_variants_negative_rejected(self):
+        """负数应被拦截：旧行为裸 traceback（rng scale<0 / 空图）。"""
+        completed = self._fusion_variants_subprocess("0.3,-0.5")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("错误: --fusion-variants 需为有限正数", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
+
+    def test_fusion_variants_valid_still_works(self):
+        """正向路径回归：合法档位仍产出 variants 对比图且 rc=0。"""
+        completed = self._fusion_variants_subprocess("0.3,0.5")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        out_dir = Path(self.tmpdir) / "out"
+        self.assertTrue((out_dir / "s_fusion_variants.png").exists())
+
+    # ── BUG-073：verify_outputs preserve_box 合法性校验 ──
+
+    def _make_change_pair(self):
+        """120pt 页 @300dpi=500×500px；final 在 (100,100)-(300,300) 有 40000 变化像素。"""
+        import fitz
+
+        def make(name, dark=None):
+            pdf = Path(self.tmpdir) / f"{name}.pdf"
+            doc = fitz.open()
+            pg = doc.new_page(width=120, height=120)
+            arr = np.full((500, 500, 3), 230, dtype=np.uint8)
+            if dark:
+                x1, y1, x2, y2 = dark
+                arr[y1:y2, x1:x2] = 40
+            png = Path(self.tmpdir) / f"{name}.png"
+            Image.fromarray(arr).save(png)
+            pg.insert_image(pg.rect, filename=str(png))
+            doc.save(str(pdf))
+            doc.close()
+            return pdf
+
+        return make("v_src"), make("v_final", (100, 100, 300, 300))
+
+    def _verify_outputs_subprocess(self, case: dict) -> "subprocess.CompletedProcess":
+        import json
+        import subprocess
+        import sys
+        cfg = Path(self.tmpdir) / "cfg.json"
+        cfg.write_text(json.dumps([case]), encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "verify_outputs.py"),
+             "--config", str(cfg)],
+            capture_output=True, text=True,
+        )
+
+    def test_verify_outputs_preserve_box_invalid_fails(self):
+        """越界/负值/倒置的 preserve_box 必须判失败，不再静默空切片假绿。"""
+        src, final = self._make_change_pair()
+        for label, box in [
+            ("越界", [600, 100, 700, 300]),
+            ("负值", [-100, -100, -50, -50]),
+            ("倒置", [300, 300, 100, 100]),
+        ]:
+            with self.subTest(box=label):
+                completed = self._verify_outputs_subprocess(
+                    {"name": label, "source_pdf": str(src), "final_pdf": str(final),
+                     "preserve_box": box}
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("preserve_box 坐标", completed.stderr)
+                self.assertNotIn("全部通过", completed.stdout)
+
+    def test_verify_outputs_preserve_box_valid_detects_change(self):
+        """正向校验回归：框盖住实际改动区域必须检出（这里 40000 变化像素）。"""
+        src, final = self._make_change_pair()
+        completed = self._verify_outputs_subprocess(
+            {"name": "框正确(应检出变化)", "source_pdf": str(src), "final_pdf": str(final),
+             "preserve_box": [100, 100, 300, 300]}
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("应保留区域出现", completed.stderr)
+
+    def test_verify_outputs_preserve_box_valid_no_change_passes(self):
+        """合法框盖住无改动区域仍通过（不与 BUG-073 修复冲突）。"""
+        src, final = self._make_change_pair()
+        completed = self._verify_outputs_subprocess(
+            {"name": "框正确(无变化应通过)", "source_pdf": str(src), "final_pdf": str(final),
+             "preserve_box": [0, 0, 80, 80]}
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    # ── BUG-074：test_e2e 夹具缺失统一按「可选」处理（结构性锁）──
+
+    def test_e2e_fixture_missing_skip_guards_locked(self):
+        """结构锁：三个曾硬断言的用例必须与 golden 用例一致地 skipTest。
+
+        行为上该修复只影响干净克隆 / CI（本工作区 tests/测试任务、tests/期望效果
+        都存在，skip 不会触发），因此用源码级断言锁定「统一 skip」不被回退。
+        """
+        e2e_src = (Path(__file__).parent / "test_e2e_basic_tasks.py").read_text(
+            encoding="utf-8")
+
+        def method_body(name: str) -> str:
+            start = e2e_src.index(f"def {name}(self):")
+            tail = e2e_src[start:]
+            # 下一个缩进为 4 空格的 `def ` 视为方法边界
+            nxt = tail.find("\n    def ")
+            return e2e_src[start:start + nxt] if nxt >= 0 else tail
+
+        for name in ("test_all_tasks_have_pdf",
+                     "test_export_page_each_task",
+                     "test_expected_assets_exist_for_tasks"):
+            body = method_body(name)
+            self.assertIn("skipTest", body,
+                          f"{name} 必须与 golden 用例一致地 skipTest（BUG-074）")
+
+
+class TestBugFix075_078(unittest.TestCase):
+    """BUG-075 至 BUG-078 回归测试（审查 CHK-044 发现的修复回归）。
+
+    - BUG-075：move 零位移生成零高自动清理框被空框守卫拒绝（原合法无操作）
+              → 零位移对应空自动清理列表；auto 无操作，add 仍跑手动框
+    - BUG-076：move 位移超过块高时自动清理框越出原块，擦掉保留内容
+              → 双向残留区钳制在原块 [y1, y2) 内
+    - BUG-077：remove_regions_telea 共享校验耗尽生成器坐标
+              → 入口先物化列表，校验与蒙版构建复用
+    - BUG-078：新增测试注解引用未导入的 subprocess（F821）且 ruff 漏查 tests
+              → 模块级导入 + run_checks.sh 门禁覆盖 tests/scripts（本类行为测试
+                的通过本身依赖模块级导入生效）
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        # 300×300 浅灰底 + 一条深色横带（y=100..130, x=50..250）
+        self.img = np.full((300, 300, 3), 240, dtype=np.uint8)
+        self.img[100:130, 50:250] = 60
+
+    # ── BUG-076：位移超过块高时，自动清理不得越出原块 ──
+
+    def test_move_block_large_downshift_preserves_gap_content(self):
+        """shift_y=-50（块高 30）：清理区应钳制在原块 [100,130)，
+        不得擦掉原块与目标块之间 [130,150) 的保留内容。"""
+        img = self.img.copy()
+        img[140:145, 145:150] = 0  # 原块外、目标块前的 5×5 保留标记
+        result, _ = utils.move_block(
+            img, content_x=(50, 250), source_y=(100, 130), shift_y=-50
+        )
+        kept = int((result[140:145, 145:150].mean(axis=2) < 120).sum())
+        self.assertEqual(kept, 25, "原块外的保留标记不得被自动清理擦除")
+        # 新块确实落到 y[150,180)
+        self.assertLess(result[150:175, 50:250].mean(), 120)
+
+    def test_move_block_large_upshift_preserves_gap_content(self):
+        """shift_y=+50（块高 30）：清理区应钳制在原块 [100,130)，
+        不得擦掉原块上方 [50,100) 中 [80,100) 段的保留内容。"""
+        img = self.img.copy()
+        img[80:85, 145:150] = 0  # 目标块上方、原块外的保留标记
+        result, _ = utils.move_block(
+            img, content_x=(50, 250), source_y=(100, 130), shift_y=50
+        )
+        kept = int((result[80:85, 145:150].mean(axis=2) < 120).sum())
+        self.assertEqual(kept, 25, "原块上方的保留标记不得被自动清理擦除")
+
+    def test_move_block_shift_equal_height_cleans_full_block(self):
+        """|shift_y| == 块高：残留区恰为整块，两方向均不应报空框错。"""
+        for shift in (30, -30):
+            with self.subTest(shift=shift):
+                result, mask = utils.move_block(
+                    self.img, content_x=(50, 250), source_y=(100, 130), shift_y=shift
+                )
+                self.assertGreater(int((mask > 0).sum()), 0,
+                                   "整块残留应产生非空清理蒙版")
+
+    # ── BUG-075：零位移恢复为合法无操作 ──
+
+    def test_move_block_zero_shift_auto_is_noop(self):
+        """shift_y=0 + cleanup_mode=auto：返回原图、零蒙版，不抛空框错误。"""
+        result, mask = utils.move_block(
+            self.img, content_x=(50, 250), source_y=(100, 130), shift_y=0
+        )
+        np.testing.assert_array_equal(result, self.img)
+        self.assertEqual(int((mask > 0).sum()), 0, "零位移 auto 蒙版应为全 0")
+
+    def test_move_block_zero_shift_add_still_cleans_manual_box(self):
+        """shift_y=0 + cleanup_mode=add：手动清理框仍应执行，不被提前返回吞掉。"""
+        img = self.img.copy()
+        img[200:210, 60:240] = 40  # 手动框内的待清理墨迹
+        _, mask = utils.move_block(
+            img, content_x=(50, 250), source_y=(100, 130), shift_y=0,
+            cleanup_boxes=[(60, 200, 240, 210)], cleanup_mode="add",
+        )
+        self.assertGreater(int((mask[200:210, 60:240] > 0).sum()), 0,
+                           "add 模式下零位移也应执行手动清理")
+
+    # ── BUG-077：生成器/迭代器坐标不得被校验耗尽 ──
+
+    def test_remove_regions_telea_accepts_generator_ink(self):
+        """ink 模式：iter() 输入应产生非零蒙版并真正删除墨迹。"""
+        result, mask = utils.remove_regions_telea(
+            self.img, iter([(50, 100, 250, 130)]), mask_mode="ink"
+        )
+        self.assertGreater(int((mask > 0).sum()), 0,
+                           "生成器输入不得在校验后耗尽为零蒙版")
+        changed = int((np.abs(result.astype(int) - self.img.astype(int)).sum(axis=2) > 0).sum())
+        self.assertGreater(changed, 0, "生成器输入的删除应真正修改图像")
+
+    def test_remove_regions_telea_accepts_generator_full(self):
+        """full 模式：生成器输入同样有效（整矩形蒙版 = 30×200 = 6000 像素）。"""
+        result, mask = utils.remove_regions_telea(
+            self.img, (b for b in [(50, 100, 250, 130)]), mask_mode="full"
+        )
+        self.assertEqual(int((mask > 0).sum()), 6000)
+        changed = int((np.abs(result.astype(int) - self.img.astype(int)).sum(axis=2) > 0).sum())
+        self.assertGreater(changed, 0)
+
+    def test_remove_regions_telea_generator_oob_still_rejected(self):
+        """生成器输入的越界框仍必须被拦截（物化不能绕过校验）。"""
+        with self.assertRaisesRegex(ValueError, "越界"):
+            utils.remove_regions_telea(self.img, iter([(50, 50, 350, 130)]))
+
+
+class TestBug079ReplaceResidueTie(unittest.TestCase):
+    """BUG-079：replace_image 的等价残留双图不得触发 strict 歧义误报。
+
+    PyMuPDF ``page.replace_image`` 对部分 PDF 结构会把旧 xref 流原地换新、另在
+    Resources 留一个内容相同的新副本（两个不同 xref、均整页放置、像素一致）。
+    package/extract 门禁在候选 PDF 上重新选图时，strict 的「两个过近」守卫曾把
+    这种等价平局当歧义报错，使封装对此类 PDF 完全不可用（20260816 测试批次
+    跑在门禁提交之前，task004/005 形状从未被覆盖）。
+    """
+
+    def _pdf_with_two_fullpage_images(self, arr1: "np.ndarray", arr2: "np.ndarray",
+                                    *, keep_draw=None):
+        import fitz
+        import io
+
+        doc = fitz.open()
+        page = doc.new_page(width=100, height=150)
+        # PNG + JPEG 两种容器承载相同/不同像素，确保得到两个不同 xref
+        for arr, fmt in ((arr1, "PNG"), (arr2, "JPEG")):
+            buf = io.BytesIO()
+            Image.fromarray(arr).save(buf, format=fmt)
+            page.insert_image(page.rect, stream=buf.getvalue())
+        if keep_draw is not None:
+            # 保留两个资源，但仅绘制其中一个，复现 replace_image 未引用副本。
+            page.set_contents(page.get_contents()[keep_draw])
+        tmp = Path(tempfile.mktemp(suffix=".pdf"))
+        doc.save(str(tmp))
+        doc.close()
+        self.addCleanup(Path(tmp).unlink)
+        return tmp
+
+    def test_identical_tied_images_extract_succeeds(self):
+        # 仅绘制一个的等价资源残留可提取；真正叠放的双图仍需拒绝。
+        arr = np.full((60, 40, 3), 120, np.uint8)
+        pdf = self._pdf_with_two_fullpage_images(arr, arr, keep_draw=0)
+        meta = utils.extract_embedded_page_image(pdf)
+        self.assertEqual(meta.image.size, (40, 60))
+
+    def test_different_tied_images_still_rejected(self):
+        # 真正不同的两个整页图：守卫必须照常报错（防止替换错对象）。
+        pdf = self._pdf_with_two_fullpage_images(
+            np.full((60, 40, 3), 10, np.uint8), np.full((60, 40, 3), 250, np.uint8)
+        )
+        with self.assertRaisesRegex(RuntimeError, "两个过近"):
+            utils.extract_embedded_page_image(pdf)
+
+    def test_identical_but_both_drawn_images_rejected(self):
+        arr = np.zeros((60, 40, 3), np.uint8)
+        pdf = self._pdf_with_two_fullpage_images(arr, arr)
+        with self.assertRaisesRegex(RuntimeError, "两个过近"):
+            utils.extract_embedded_page_image(pdf)
+
+    def test_different_soft_masks_not_pixel_equivalent(self):
+        import fitz
+        arr = np.zeros((60, 40, 3), np.uint8)
+        rgba = np.dstack((arr, np.full((60, 40), 128, np.uint8)))
+        pdf = self._pdf_with_two_fullpage_images(rgba, arr, keep_draw=0)
+        with fitz.open(pdf) as doc:
+            xrefs = [entry[0] for entry in doc[0].get_images(full=True)]
+            self.assertFalse(utils._tied_xrefs_pixel_identical(doc[0], xrefs))
+        with self.assertRaisesRegex(RuntimeError, "两个过近"):
+            utils.extract_embedded_page_image(pdf)
+
+    def test_replacement_rejects_real_overlay_without_output(self):
+        arr = np.zeros((60, 40, 3), np.uint8)
+        pdf = self._pdf_with_two_fullpage_images(arr, arr)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "edited.pdf"
+            edited = arr.copy()
+            edited[10:20, 10:20] = 255
+            with self.assertRaisesRegex(RuntimeError, "两个过近"):
+                utils.replace_pdf_image(pdf, output, Image.fromarray(edited))
+            self.assertFalse(output.exists())
+
+    def test_unused_first_resource_selects_drawn_second(self):
+        import fitz
+        arr = np.zeros((60, 40, 3), np.uint8)
+        pdf = self._pdf_with_two_fullpage_images(arr, arr, keep_draw=1)
+        with fitz.open(pdf) as doc:
+            drawn = doc[0].get_images(full=True)[1][0]
+        meta = utils.extract_embedded_page_image(pdf)
+        self.assertEqual(meta.xref, drawn)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "edited.pdf"
+            edited = arr.copy()
+            edited[10:20, 10:20] = 255
+            utils.replace_pdf_image(pdf, output, Image.fromarray(edited))
+            # 同时验证回读像素与页面可见编辑，不能只检查提取不报错。
+            np.testing.assert_array_equal(
+                np.asarray(utils.extract_embedded_page_image(output).image), edited)
+            with fitz.open(pdf) as before, fitz.open(output) as after:
+                self.assertNotEqual(before[0].get_pixmap().samples,
+                                    after[0].get_pixmap().samples)
+
+    def test_image_names_skip_literal_hex_comments_and_escaped_names(self):
+        import fitz
+        arr = np.zeros((60, 40, 3), np.uint8)
+        pdf = self._pdf_with_two_fullpage_images(arr, arr, keep_draw=1)
+        with fitz.open(pdf) as doc:
+            page = doc[0]
+            entries = page.get_images(full=True)
+            unused, drawn = entries[0][7], entries[1][7]
+            stream = page.read_contents()
+            # 字符串、十六进制串、注释中的假Do均不能当绘制；名字支持#xx转义。
+            prefix = (f"BT (/ {unused} Do ({unused})) Tj ET\n"
+                      f"% /{unused} Do\n").encode()
+            prefix += b"BT <2f" + unused.encode().hex().encode() + b"20446f> Tj ET\n"
+            encoded = "#" + format(ord(drawn[0]), "02x") + drawn[1:]
+            stream = stream.replace(("/" + drawn + " Do").encode(),
+                                    ("/" + encoded + " % between operands\n Do").encode())
+            doc.update_stream(page.get_contents()[0], prefix + stream)
+            self.assertEqual(utils._select_page_image_xref(page, entries), entries[1][0])
+
+    def test_hard_mask_tie_rejected(self):
+        import fitz
+        arr = np.zeros((60, 40, 3), np.uint8)
+        pdf = self._pdf_with_two_fullpage_images(arr, arr, keep_draw=0)
+        with fitz.open(pdf) as doc:
+            entries = doc[0].get_images(full=True)
+            doc.xref_set_key(entries[0][0], "Mask", "[0 0 0 0 0 0]")
+            self.assertFalse(utils._tied_xrefs_pixel_identical(
+                doc[0], [entry[0] for entry in entries]))
+
+    def test_inline_image_content_keeps_tie_rejected(self):
+        import fitz
+        arr = np.zeros((60, 40, 3), np.uint8)
+        pdf = self._pdf_with_two_fullpage_images(arr, arr, keep_draw=0)
+        with fitz.open(pdf) as doc:
+            page = doc[0]
+            doc.update_stream(page.get_contents()[0], page.read_contents() +
+                              b"\nBI /W 1 /H 1 /BPC 8 /CS /RGB ID \x00\x00\x00 EI\n")
+            with self.assertRaisesRegex(RuntimeError, "两个过近"):
+                utils._select_page_image_xref(page, page.get_images(full=True))
 
 
 if __name__ == "__main__":

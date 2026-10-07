@@ -1,6 +1,6 @@
 # skills-scanned-pdf-editor
 
-**Version: V0.1.6** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
+**Version: V0.1.7** · see [`VERSION`](VERSION) / [`CHANGELOG.md`](CHANGELOG.md)
 
 [English](#english) | [中文](#中文)
 
@@ -50,7 +50,7 @@ Two technical routes share the same goal (“looks like the original scan”):
 ```
 .
 ├── README.md                 # This file (repo overview)
-├── VERSION                   # Current version (V0.1.6)
+├── VERSION                   # Current version (V0.1.7)
 ├── CHANGELOG.md              # Release notes
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Session conventions for agents
@@ -167,7 +167,9 @@ cd skills/scanned-pdf-editor/scripts
 ./run_checks.sh          # version sync check + ruff + unit + e2e
 ```
 
-`run_checks.sh` runs version consistency (repo `VERSION` vs `SKILL.md` vs install copies), `ruff check`, unit tests (`tests/scripts/test_skill.py`), and basic-tasks e2e (`tests/scripts/test_e2e_basic_tasks.py`, skipped when the dev-only test assets are absent). After pulling, run `bash scripts/sync_install.sh` if install copies drift.
+`run_checks.sh` runs version consistency (repo `VERSION` vs `SKILL.md` vs install copies), `ruff check` (scripts + `tests/scripts`), unit tests (`tests/scripts/test_skill.py`), and basic-tasks e2e (`tests/scripts/test_e2e_basic_tasks.py`, skipped when the dev-only test assets are absent). After pulling, run `bash scripts/sync_install.sh` if install copies drift.
+
+To audit a specific local result batch, run `SCANNED_PDF_RESULTS_BATCH=20261007 ./run_checks.sh`. Missing assets or task003–005 deliveries then fail. Golden checks use that batch's `taskNNN_result.pdf` or legacy `final.pdf`, rendered at 300dpi; they do not fall back to earlier batches. Golden PNGs are resized with bilinear interpolation. The broad thresholds detect large regressions; font quality still requires a separate review.
 
 ### License
 
@@ -219,7 +221,7 @@ cd skills/scanned-pdf-editor/scripts
 ```
 .
 ├── README.md                 # 本文件（仓库总览）
-├── VERSION                   # 当前版本号（V0.1.6）
+├── VERSION                   # 当前版本号（V0.1.7）
 ├── CHANGELOG.md              # 版本说明
 ├── LICENSE                   # MIT
 ├── CLAUDE.md                 # Agent 会话约定
@@ -325,7 +327,9 @@ cd skills/scanned-pdf-editor/scripts
 ./run_checks.sh
 ```
 
-`run_checks.sh` 依次执行版本一致性检查（仓库 `VERSION` vs `SKILL.md` vs 安装副本）、`ruff check`、pytest 单元测试（`tests/scripts/test_skill.py`）和可选的 basic-tasks e2e（`tests/scripts/test_e2e_basic_tasks.py`，测试文件与资产缺失时自动跳过）。编辑后 PDF 的端到端验证用 `verify_outputs.py` 配 JSON 配置驱动（见 skill README）。
+`run_checks.sh` 依次执行版本一致性检查（仓库 `VERSION` vs `SKILL.md` vs 安装副本）、`ruff check`（scripts 与 `tests/scripts`）、pytest 单元测试（`tests/scripts/test_skill.py`）和可选的 basic-tasks e2e（`tests/scripts/test_e2e_basic_tasks.py`，测试文件与资产缺失时自动跳过）。编辑后 PDF 的端到端验证用 `verify_outputs.py` 配 JSON 配置驱动（见 skill README）。
+
+复测时用 `SCANNED_PDF_RESULTS_BATCH=20261007 ./run_checks.sh` 显式绑定本地批次，此时缺资产或task003～005交付会失败。golden门禁读取本批 `taskNNN_result.pdf` 或旧 `final.pdf`，不会回退历史批次；固定300dpi回渲并将golden双线性缩放对齐。宽松阈值用于捕捉大幅回归，字体质量仍需专项审核。
 
 ### 许可证
 

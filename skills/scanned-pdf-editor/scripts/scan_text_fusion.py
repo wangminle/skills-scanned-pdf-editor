@@ -465,6 +465,13 @@ def run(args: argparse.Namespace) -> dict[str, Path]:
                 strengths = [float(x) for x in raw]
             except ValueError:
                 raise SystemExit(f"错误: --fusion-variants 需为逗号分隔的数值，收到: {args.fusion_variants!r}")
+            # BUG-072：float 接受 nan/inf，注释承诺"有限正数"却没校验。nan 让 alpha
+            # 全 nan → 近黑图（仅 RuntimeWarning，rc=0）；负数让 rng.normal(scale<0)
+            # 裸 ValueError traceback。与 BUG-060 的其它 float 参数一致，进入渲染前拦截。
+            if any(not np.isfinite(v) or v <= 0 for v in strengths):
+                raise SystemExit(
+                    f"错误: --fusion-variants 需为有限正数（>0），收到: {args.fusion_variants!r}"
+                )
         else:
             strengths = SCAN_STYLE_DEFAULTS[args.scan_style]["variants"]
         panels: list[tuple[str, Image.Image]] = []

@@ -143,6 +143,11 @@ def make_location_image(source: np.ndarray, boxes, labels=None) -> Image.Image:
 def cmd_remove(args: argparse.Namespace) -> int:
     source = load_rgb(args.source)
     boxes = [parse_box(b) for b in args.boxes]
+    # BUG-070：越界框会被 numpy 静默截断（完全越界则空切片），负坐标会被当负索引
+    # 绕到页尾，二者都 rc=0 且"看着成功"。move 已有 BUG-020/037/038 守卫，这里对齐。
+    # telea 路径 remove_regions_telea 内部也会校验；此处覆盖 interpolate 的 CLI 入口
+    # （库函数 remove_regions_interpolate 的 BUG-022 裁剪语义由既有测试锁定，不改）。
+    utils.validate_boxes_in_bounds(source, boxes, label="--boxes")
 
     if args.method == "telea":
         result, mask = utils.remove_regions_telea(

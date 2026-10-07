@@ -20,7 +20,7 @@
 | 参数 | 说明 | 默认 |
 |---|---|---|
 | `--source` | 源图片路径 | 必填 |
-| `--boxes` | 删除区域 `x1,y1,x2,y2`，可多个（须非负且有序） | 必填 |
+| `--boxes` | 删除区域 `x1,y1,x2,y2`，可多个（须非负、有序，且完整落在图内；越界报错不静默截断——BUG-070 前越界框会被 numpy 截断或负索引绕行却 rc=0） | 必填 |
 | `--method` | `telea`（墨迹蒙版+修补）/ `interpolate`（行间插值填底） | `telea` |
 | `--ink-threshold` | 墨迹亮度阈值（<此值为墨迹） | 180 |
 | `--dilation` | 墨迹蒙版膨胀核大小 | 5 |
@@ -40,16 +40,19 @@
 | `--source` | 源图片路径 | 必填 |
 | `--content-x` | 移动区域横向范围 `x1,x2`（须覆盖 `source-y` 带内全部正文墨迹） | 必填 |
 | `--source-y` | 移动区域纵向范围 `y1,y2` | 必填 |
-| `--shift-y` | 上移像素数（正值=上移；目标越出页面报错） | 必填 |
+| `--shift-y` | 上移像素数（正值=上移、负值=下移；目标越出页面报错） | 必填 |
 | `--cleanup-ink-threshold` | 残留清理墨迹阈值 | 246 |
 | `--cleanup-mode` | `auto`/`add`/`replace`（语义见下） | `auto` |
-| `--cleanup-boxes` | 手动清理框；仅配合 `add`/`replace` | 无 |
+| `--cleanup-boxes` | 手动清理框；仅配合 `add`/`replace`（须非空、有序且落在图内） | 无 |
 | `--output` | 输出图片路径 | 必填 |
 | `--crop-box` | 额外裁剪预览框 | 无 |
 | `--save-mask` | 保存清理蒙版 PNG | 无 |
 
-清理语义：`--cleanup-mode auto/add/replace` 分别表示仅自动尾部框、自动框追加手动框、仅手动框。
+清理语义：`--cleanup-mode auto/add/replace` 分别表示仅自动残留框、自动框追加手动框、仅手动框。
 `auto` 与 `--cleanup-boxes` 同时出现会报错，`replace` 没有手动框也会报错。
+自动框 = 原块中未被移动后新块覆盖的残留部分（上移清原块底部、下移清原块顶部），
+始终钳制在原块 `[y1,y2)` 内——位移达到/超过块高时整块清理，不会擦到原块之外的保留内容；
+`shift-y 0` 无自动清理（`auto` 返回原图，`add` 仍执行手动框）。
 
 ### replace
 
@@ -101,7 +104,7 @@
 | `--blank-thresholds` | 残影检查阈值列表（逗号分隔） | `180,220,240` |
 | `--blank-threshold` | 旧单阈值参数（兼容别名，映射到 `--blank-thresholds`） | — |
 | `--blank-limit` | 各阈值下空白区深色像素上限 | 0 |
-| `--preserve-box` | 应保留不变区域（须与图像有交集） | 无 |
+| `--preserve-box` | 应保留不变区域；框非法（负值/倒置）或越出图外直接计为验证错误（不再假绿），合法框须与图像有交集 | 无 |
 
 默认同时检查深色（<180）、浅灰（<220）和近纸白（<240）三级残影；
 严格交付不要退回单阈值。
@@ -190,7 +193,7 @@
 | `--fusion-strength` | 融合粗糙度倍率 | 按 scan-style |
 | `--halo-strength` | 蓝灰晕染强度倍率 | 1.0 |
 | `--variants` | 生成融合强度对比接触图 | off |
-| `--fusion-variants` | 自定义 `--variants` 的强度档（逗号分隔，如 0.25,0.35,0.5） | 按 `--scan-style` |
+| `--fusion-variants` | 自定义 `--variants` 的强度档（逗号分隔，如 0.25,0.35,0.5；每档须为有限正数 >0，`nan`/0/负值直接拒绝退出码非 0） | 按 `--scan-style` |
 | `--compare` | 前后对比图 | off |
 | `--stroke-shoulder` | 字重肩部混合权重（替换后备建议 0.25） | 0.0 |
 | `--core-alpha-scale` | 核心透明度缩放（替换后备建议 0.875） | 0.965 |

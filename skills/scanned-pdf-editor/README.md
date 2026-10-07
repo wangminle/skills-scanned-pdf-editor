@@ -1,6 +1,6 @@
 # scanned-pdf-editor
 
-**版本：V0.1.6**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
+**版本：V0.1.7**（与仓库根目录 `VERSION` / `CHANGELOG.md` 同步）
 
 扫描版 PDF / 扫描件图片的局部编辑技能：删除指定内容、移动正文位置、替换已有文字、补录新增文字，
 使修改区域的像素与原扫描件的字体、字号、墨色、纸纹、扫描噪点风格一致。
@@ -8,7 +8,9 @@
 > 运行环境：**Python 3.10+**。
 
 > 坐标约定：框与区间一律非负且有序（`x1<x2`、`y1<y2`；`--content-x` / `--source-y` 亦同）；
-> 负坐标会报错，不会静默回绕。`move` 的内容区须完整落在图内（x/y 均校验）。
+> 负坐标会报错，不会静默回绕。删除/清理框（`--boxes`、`--remove-boxes`、
+> `--cleanup-boxes`）须**完整落在图内**，越界直接报错，不会被静默截断。
+> `move` 的内容区须完整落在图内（x/y 均校验）。
 > `package --page-size` 须为正数对；无 `--page-size` 时 `--dpi` 须为正整数；
 > `--page-index` 须在页码范围内。详情见 `SKILL.md`。
 
@@ -20,7 +22,7 @@ cd scripts
 # 自测
 python3 -m pytest ../../../tests/scripts/test_skill.py -v
 
-# 回归门禁（版本同步 + ruff + pytest + 可选 e2e，任一失败即非零退出）
+# 回归门禁（版本同步 + ruff(scripts+tests) + pytest + 可选 e2e，任一失败即非零退出）
 ./run_checks.sh
 
 # 删除指定区域

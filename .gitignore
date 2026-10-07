@@ -199,8 +199,10 @@ Desktop.ini
 *~
 
 # Local Agent skill install directories (user/workspace discoverable paths)
+# 注：.claude/ 不再整目录忽略——settings.json 与 hooks/（task-list 同步提醒）随仓库共享，仅忽略本地个人配置
 .agents/
-.claude/
+.claude/settings.local.json
+.claude/skills
 .zcode/
 
 # Local environment variants; keep the shareable template
